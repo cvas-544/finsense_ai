@@ -58,10 +58,16 @@ class BudgetingLanguage(AgentLanguage):
         """
         prompt = []
 
+        goal_descriptions = "\n".join([f"{g.name}: {g.description}" for g in goals])
+        agent_rules = (
+                "When updating a transaction, assume the most recent match is correct unless otherwise specified. "
+                "Do not prompt the user for more details unless multiple very similar matches are found. "
+                "Use available tools to complete the task whenever possible."
+        )
         # Add system-level information about goals
         prompt.append({
             "role": "system",
-            "content": "\n".join([f"{g.name}: {g.description}" for g in goals])
+            "content": f"{goal_descriptions}\n\n{agent_rules}"
         })
 
         # Add memory entries to the prompt
