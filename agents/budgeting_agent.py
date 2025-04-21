@@ -154,7 +154,6 @@ def create_budgeting_agent():
     Returns:
         An instance of BaseAgent configured for budgeting tasks.
     """
-    print("🧰 Registered tools:", list(tools.keys()))
 
     # Create and return the budgeting agent
     return BaseAgent(
