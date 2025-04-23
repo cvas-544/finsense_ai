@@ -536,7 +536,7 @@ def import_pdf_transactions(file_path: str) -> Dict:
     # ---------------------------
     # 🧾 2. Save Raw Dump
     # ---------------------------
-    raw_dir = "parsed_pdfs/raw"
+    raw_dir = "data/parsed_pdfs/raw"
     os.makedirs(raw_dir, exist_ok=True)
 
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -574,8 +574,8 @@ def import_pdf_transactions(file_path: str) -> Dict:
     # ---------------------------
     # 🧠 4. Save Metadata
     # ---------------------------
-    meta_path = "parsed_pdfs/metadata.json"
-    os.makedirs("parsed_pdfs", exist_ok=True)
+    meta_path = "data/parsed_pdfs/metadata.json"
+    os.makedirs("data/parsed_pdfs", exist_ok=True)
     try:
         with open(meta_path, "r") as f:
             metadata = json.load(f)
@@ -595,10 +595,11 @@ def import_pdf_transactions(file_path: str) -> Dict:
     # ✅ Done
     # ---------------------------
     return {
-        "message": f"Imported {len(transactions)} transactions from PDF.",
-        "stored": len(new_txs),
-        "duplicates_skipped": len(transactions) - len(new_txs),
-        "raw_dump": raw_path
+    "message": f"Imported {len(transactions)} transactions from PDF.",
+    "stored": len(new_txs),
+    "duplicates_skipped": len(transactions) - len(new_txs),
+    "raw_dump": raw_path,
+    "transactions": new_txs  # ← Add this line!
     }
 
 # -----------------------------------------
@@ -606,12 +607,24 @@ def import_pdf_transactions(file_path: str) -> Dict:
 # -----------------------------------------
 
 @register_tool(tags=["budgeting", "autocategorize", "auto", "clean_uncategorized", "smart_categorization"])
-def auto_categorize_transactions() -> Dict:
+def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> Dict:
     """
-    Auto-categorizes all transactions with type 'uncategorized'.
-    First attempts keyword matching. If that fails, uses LLM to guess category.
-    Prompts user before applying changes.
+    - Auto-categorizes transactions using keyword rules and LLM fallback.
+    - Auto-categorizes all transactions with type 'uncategorized'.
+    - First attempts keyword matching. If that fails, uses LLM to guess category.
+    - Prompts user before applying changes.
+    Can be run:
+    - Before budget summary
+    - Or directly by user request
+
+    Args:
+        transactions (optional): Provide a list of uncategorized transactions.
+                                 If None, it loads from the database and filters uncategorized ones.
+
+    Returns:
+        Dict with update counts or confirmation message.
     """
+
     db_path = "data/transactions.json"
     try:
         with open(db_path, "r") as f:
