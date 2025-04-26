@@ -2,12 +2,13 @@
 File: notion_sync_runner.py
 Author: Vasu Chukka
 Created: 2025-04-22
-Last Modified: 2025-04-23
+Last Modified: 2025-04-26
 Description:
     Full Notion sync runner for FinSense Agent.
     - Downloads PDFs from Notion and parses them
+    - Updates Notion PDF Status (Parsed/Error)
     - Merges transactions into local store
-    - Handles deduplication and logging
+    - Handles deduplication, auto-categorization, and logging
 """
 
 from datetime import datetime
@@ -19,6 +20,7 @@ from utils.notion_sync import (
     fetch_pdf_uploads_from_notion,
     fetch_transactions_from_notion,
     SYNC_LOGS_DB_ID,
+    PDF_UPLOADS_DB_ID,
 )
 from utils.constants import TRANSACTIONS_PATH, NOTION_PDF_DIR
 from tools.budgeting_tools import auto_categorize_transactions, import_pdf_transactions
@@ -32,6 +34,8 @@ def sync_from_notion():
         url = pdf["file"]
         name = pdf["title"].replace(" ", "_") + ".pdf"
         path = os.path.join(NOTION_PDF_DIR, name)
+        notion_page_id = pdf["id"]
+
         try:
             response = requests.get(url)
             if response.status_code == 200:
@@ -40,15 +44,37 @@ def sync_from_notion():
                 print(f"✅ Downloaded {name}")
             else:
                 print(f"⚠️ Failed to download {name} (status {response.status_code})")
+                continue  # Skip parsing if download failed
         except Exception as e:
             print(f"❌ Error downloading {name}: {str(e)}")
-        
-        # ✅ Now parse and merge into transaction DB
+            continue
+
+        # ✅ Parse and merge into transaction DB
         try:
             parsed_result = import_pdf_transactions(file_path=path)
-            print(f"✅ Imported {len(parsed_result['transactions'])} transactions from {name}")
+            print(f"✅ Imported {parsed_result['stored']} transactions from {name}")
+
+            # ✅ Update Notion Status to Parsed
+            notion.pages.update(
+                page_id=notion_page_id,
+                properties={
+                    "Status": {
+                        "select": {"name": "Parsed"}
+                    }
+                }
+            )
         except Exception as e:
             print(f"❌ Failed to import {name}: {e}")
+
+            # ❌ Update Notion Status to Error
+            notion.pages.update(
+                page_id=notion_page_id,
+                properties={
+                    "Status": {
+                        "select": {"name": "Error"}
+                    }
+                }
+            )
 
     # -------------------------------
     # 2. 💾 Merge Notion transactions
