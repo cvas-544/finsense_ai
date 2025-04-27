@@ -150,12 +150,21 @@ def generate_response(prompt: Prompt) -> str:
 def create_budgeting_agent():
     """
     Creates and initializes a budgeting agent.
+    Automatically triggers onboarding if no user profile found.
 
     Returns:
         An instance of BaseAgent configured for budgeting tasks.
     """
+    from agents.onboarding_flow import load_user_profile, onboarding_conversation
 
-    # Create and return the budgeting agent
+    # 🧠 Load or Initialize User Profile
+    profile = load_user_profile()
+
+    if not profile:
+        print("\n🧑‍💼 No user profile found. Starting onboarding setup...\n")
+        onboarding_conversation()
+
+    # Now continue normal agent setup
     return BaseAgent(
         goals=get_budgeting_goals(),  # Retrieve the goals for budgeting
         agent_language=BudgetingLanguage(),  # Use the custom language class
