@@ -714,20 +714,21 @@ Respond ONLY with the best-fit category name."""
 # -----------------------------------------
 # 📊 Tool: Summarize Category Spending
 # -----------------------------------------
-@register_tool(tags=["budgeting"])
-def summarize_category_spending(category: str, month: Optional[str] = None) -> Dict:
+# File: tools/budgeting_tools.py
+
+@register_tool(tags=["budgeting", "summarize"])
+def summarize_category_spending(category: str, month_str: str) -> Dict:
     """
     Tool Name: summarize_category_spending
 
     Description:
-        - Calculates the total amount spent in a specific category or budgeting type (e.g., 'Groceries' or 'Needs')
-          from the persistent transaction database. Supports optional month filtering.
+        Summarize spending for a given category and month (YYYY-MM).
+        If category == "All", include all categories.
 
     Arguments:
-        category (str): Can be a fine-grained category (e.g., 'Groceries', 'Clothing') 
-                        or a high-level type (e.g., 'Needs', 'Wants', 'Savings')
-        month (Optional[str]): Natural language month filter like 'March', 'March 2025'.
-                               If omitted, shows all-time data.
+        category (str): e.g. 'Groceries', 'Clothing', or a type 'Needs', 'Wants', 'Savings', 'All'
+        month_str (str): Natural-language month filter like 'March', 'March 2025', or a YYYY-MM string.
+                         If omitted or unrecognized, defaults to all time.
 
     Returns:
         {
@@ -737,62 +738,77 @@ def summarize_category_spending(category: str, month: Optional[str] = None) -> D
             "transactions": <List[Dict]>,
             "message": <summary string>
         }
+        or on error:
+        {"message": "..."}
     """
-    import os
-    import json
-    import re
+    TRANSACTIONS_PATH = "data/transactions.json"
 
-    # Normalize and parse month to YYYY-MM
-    month = month.strip() if month else None
-    if month:
-        month = month.lower()
-        year = datetime.now().year
-        match = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)", month, re.IGNORECASE)
-        month_names = {
-            "january": "01", "february": "02", "march": "03", "april": "04",
-            "may": "05", "june": "06", "july": "07", "august": "08",
-            "september": "09", "october": "10", "november": "11", "december": "12"
-        }
-        if match:
-            m = match.group(1).lower()
-            if re.search(r"\d{4}", month):
-                year = re.search(r"\d{4}", month).group()
-            month = f"{year}-{month_names[m]}"
-        else:
-            month = None
+    # 1) Normalize & parse month_str → YYYY-MM
+    month = None
+    if month_str:
+        m = re.search(
+            r"(january|february|march|april|may|june|july|"
+            r"august|september|october|november|december)"
+            r"(?:\s+(\d{4}))?",
+            month_str.strip(),
+            re.IGNORECASE
+        )
+        if m:
+            month_name = m.group(1).lower()
+            year = m.group(2) or str(datetime.now().year)
+            month_map = {
+                "january":"01","february":"02","march":"03","april":"04",
+                "may":"05","june":"06","july":"07","august":"08",
+                "september":"09","october":"10","november":"11","december":"12"
+            }
+            month = f"{year}-{month_map[month_name]}"
 
-    # Normalize label
+    # 2) Normalize category/type flags
     label = category.strip().title()
     is_type = label in {"Needs", "Wants", "Savings"}
-    is_all = label == "All"
+    is_all  = label == "All"
 
+    # 3) Load transactions with robust error handling
     try:
-        with open("data/transactions.json", "r") as f:
+        with open(TRANSACTIONS_PATH, "r") as f:
             transactions = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"message": "No transactions found."}
+    except FileNotFoundError:
+        return {"message": "No transactions database found."}
+    except json.JSONDecodeError:
+        return {"message": "Transactions database is corrupted."}
 
-    # Filter by month + category/type
-    matched = []
+    # 4) Filter by month and by category/type
+    matched: List[Dict] = []
     for tx in transactions:
-        if month and tx.get("date", "")[:7] != month:
+        # month filter
+        if month and not tx.get("date", "").startswith(month):
             continue
+
+        # category/type filter
         if is_all:
             matched.append(tx)
         elif is_type:
-            if tx.get("type", "").title() != label:
+            if tx.get("type", "").title() == label:
                 matched.append(tx)
         else:
-            if tx.get("category", "").title() != label:
+            if tx.get("category", "").title() == label:
                 matched.append(tx)
 
-    total = sum(abs(tx.get("amount", 0)) for tx in matched)
+    # 5) Compute total spent (only sum the negative amounts, turning them positive)
+    total_spent = sum(-tx["amount"] for tx in matched
+                      if isinstance(tx.get("amount"), (int, float)) and tx["amount"] < 0)
+
+    # 6) Build response
+    pretty_cat = "all expenses" if is_all else label
+    period     = month          if month else "all time"
+    message    = f"You spent €{total_spent:.2f} on {pretty_cat} in {period}."
+
     return {
-        "category": label,
-        "month": month or "all",
-        "total_spent": round(total, 2),
+        "category":    label,
+        "month":       month or "all",
+        "total_spent": round(total_spent, 2),
         "transactions": matched,
-        "message": f"You spent €{round(total, 2)} on {label} in {month or 'all time'}."
+        "message":     message
     }
 
 # -----------------------------------------
@@ -800,66 +816,117 @@ def summarize_category_spending(category: str, month: Optional[str] = None) -> D
 # -----------------------------------------
 
 @register_tool(tags=["budgeting", "query", "spending", "category"])
-def query_category_spending(category: str) -> dict:
+def query_category_spending(category: str, month: str = None) -> dict:
     """
     Tool Name: query_category_spending
     Description:
-        Routes natural-language category queries like "groceries in March" or "expenses last month"
-        to the appropriate budget summarization logic.
+        Routes natural-language category queries like "groceries in March"
+        or "expenses last month" to the appropriate summarizer.
 
     Args:
-        category (str): Natural phrase from user, e.g., "groceries in March"
+        nl (str): Natural-language query, e.g. "eating out in March 2025"
 
     Returns:
-        Dictionary with total spending, matched transactions, and summary message.
+        Dict with total spending, matched transactions, and summary message.
     """
-    import re
-    from datetime import datetime
-    from tools.budgeting_tools import summarize_category_spending
+    nl = category.strip().lower()
 
-    category_lower = category.strip().lower()
-    month_match = re.search(
-        r"(january|february|march|april|may|june|july|august|september|october|november|december)",
-        category_lower,
-        re.IGNORECASE,
+    # 1) Extract month name + optional year
+    month_regex = re.compile(
+        r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", 
+        re.IGNORECASE
     )
-
-    # Step 1: Extract Month in YYYY-MM format if possible
-    if month_match:
-        month_name = month_match.group(0).title()
-        month_number = datetime.strptime(month_name, "%B").month
-        year_match = re.search(r"\b(20\d{2})\b", category_lower)
-        year = int(year_match.group(0)) if year_match else datetime.now().year
-        month_str = f"{year}-{month_number:02d}"
-        cleaned_category = (
-            category_lower.replace(f"in {month_name.lower()}", "")
-            .replace(month_name.lower(), "")
-            .strip()
-        )
-    elif "last month" in category_lower:
+    m = month_regex.search(nl)
+    if m:
+        month_name = m.group(1).title()
+        month_num = datetime.strptime(month_name, "%B").month
+        year_match = re.search(r"\b(20\d{2})\b", nl)
+        year = int(year_match.group(1)) if year_match else datetime.now().year
+        month_str = f"{year}-{month_num:02d}"
+        # Remove the “in March” (or just “March”) from the phrase:
+        nl_cleaned = re.sub(rf"\b(in\s+)?{month_name.lower()}\b", "", nl).strip()
+    elif "last month" in nl:
         today = datetime.today()
-        month = today.month - 1 or 12
-        year = today.year if today.month > 1 else today.year - 1
-        month_str = f"{year}-{month:02d}"
-        cleaned_category = category_lower.replace("last month", "").strip()
-    elif "this month" in category_lower:
-        month_str = datetime.now().strftime("%Y-%m")
-        cleaned_category = category_lower.replace("this month", "").strip()
+        prev_month = today.month - 1 or 12
+        prev_year = today.year if today.month > 1 else today.year - 1
+        month_str = f"{prev_year}-{prev_month:02d}"
+        nl_cleaned = nl.replace("last month", "").strip()
     else:
+        # default to this month
         month_str = datetime.now().strftime("%Y-%m")
-        cleaned_category = category_lower
+        nl_cleaned = nl
 
-    # Step 2: Check for general "spending" or "expenses" phrasing
-    general_terms = {"expenses", "spending", "total", "total spending"}
-    if any(term in cleaned_category for term in general_terms):
-        return summarize_category_spending("All", month_str)
+    # 2) If they asked “expenses” in general, use “All”
+    if any(tok in nl_cleaned for tok in ("expense", "spending", "total")):
+        cat = "All"
+    else:
+        # Title-case the remainder to match your categories
+        cat = nl_cleaned.title()
 
-    # Step 3: Normalize category to title case
-    cleaned_category = (
-        cleaned_category.replace("in", "").replace("on", "").strip().title()
-    )
+    # 3) Finally call your summarizer
+    return summarize_category_spending(cat, month_str)
 
-    return summarize_category_spending(cleaned_category, month_str)
+# @register_tool(tags=["budgeting", "query", "spending", "category"])
+# def query_category_spending(category: str) -> dict:
+#     """
+#     Tool Name: query_category_spending
+#     Description:
+#         Routes natural-language category queries like "groceries in March" or "expenses last month"
+#         to the appropriate budget summarization logic.
+
+#     Args:
+#         category (str): Natural phrase from user, e.g., "groceries in March"
+
+#     Returns:
+#         Dictionary with total spending, matched transactions, and summary message.
+#     """
+#     import re
+#     from datetime import datetime
+#     from tools.budgeting_tools import summarize_category_spending
+
+#     category_lower = category.strip().lower()
+#     month_match = re.search(
+#         r"(january|february|march|april|may|june|july|august|september|october|november|december)",
+#         category_lower,
+#         re.IGNORECASE,
+#     )
+
+#     # Step 1: Extract Month in YYYY-MM format if possible
+#     if month_match:
+#         month_name = month_match.group(0).title()
+#         month_number = datetime.strptime(month_name, "%B").month
+#         year_match = re.search(r"\b(20\d{2})\b", category_lower)
+#         year = int(year_match.group(0)) if year_match else datetime.now().year
+#         month_str = f"{year}-{month_number:02d}"
+#         cleaned_category = (
+#             category_lower.replace(f"in {month_name.lower()}", "")
+#             .replace(month_name.lower(), "")
+#             .strip()
+#         )
+#     elif "last month" in category_lower:
+#         today = datetime.today()
+#         month = today.month - 1 or 12
+#         year = today.year if today.month > 1 else today.year - 1
+#         month_str = f"{year}-{month:02d}"
+#         cleaned_category = category_lower.replace("last month", "").strip()
+#     elif "this month" in category_lower:
+#         month_str = datetime.now().strftime("%Y-%m")
+#         cleaned_category = category_lower.replace("this month", "").strip()
+#     else:
+#         month_str = datetime.now().strftime("%Y-%m")
+#         cleaned_category = category_lower
+
+#     # Step 2: Check for general "spending" or "expenses" phrasing
+#     general_terms = {"expenses", "spending", "total", "total spending"}
+#     if any(term in cleaned_category for term in general_terms):
+#         return summarize_category_spending("All", month_str)
+
+#     # Step 3: Normalize category to title case
+#     cleaned_category = (
+#         cleaned_category.replace("in", "").replace("on", "").strip().title()
+#     )
+
+#     return summarize_category_spending(cleaned_category, month_str)
 
 # -----------------------------------------
 # 📈 Tool Terminate: Agent Terminate
