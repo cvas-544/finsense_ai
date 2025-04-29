@@ -8,7 +8,7 @@ Description: Cleaned and enhanced version of budgeting tools module.
 
 import re
 import os
-import json
+import json, calendar
 import pdfplumber
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -21,6 +21,60 @@ from utils.date_helpers import extract_month_from_phrase
 # Initializes the OpenAI client using the API key from environment variables.
 load_dotenv()
 llm_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# -----------------------------------------
+# File: tools/budgeting_tools.py
+# -----------------------------------------
+TRANSACTIONS_PATH = "data/transactions.json"
+
+# ----------------------------
+# Tool: 🧠 Profile loader
+# ----------------------------
+PROFILE_PATH = "data/default_profile.json"
+
+def _load_profile() -> Dict:
+    os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
+    try:
+        with open(PROFILE_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_profile(profile: Dict):
+    with open(PROFILE_PATH, "w") as f:
+        json.dump(profile, f, indent=2)
+
+# ------------------------------
+# Tool: 🗂️ Load Category Groups
+# ------------------------------
+def load_category_groups() -> Dict[str, List[str]]:
+    path = "data/category_groups.json"
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+    else:
+        return {}
+
+# ----------------------------
+# Tool: 🗓️ Parse Month
+# ----------------------------
+def _parse_month(month_str: str) -> str:
+    m = re.search(
+        r"(january|february|march|april|may|june|july|"
+        r"august|september|october|november|december)"
+        r"(?:\s+(\d{4}))?",
+        month_str.strip(),
+        re.IGNORECASE
+    )
+    if not m:
+        return None
+    month_name = m.group(1).lower()
+    year = m.group(2) or str(datetime.now().year)
+    month_map = {name: f"{idx:02d}" for idx, name in enumerate(calendar.month_name) if idx}
+    return f"{year}-{month_map[month_name]}"
 
 # ----------------------------
 # Tool: 🧠 Fuzzy Match Helper
@@ -72,24 +126,42 @@ def parse_bank_pdf(file_path: str) -> List[Dict]:
     import pdfplumber
     import re
     from datetime import datetime
+    import json
+    import os
+
+    # Load dynamic keyword list
+    keywords_path = "data/expense_income_keywords.json"
+    if os.path.exists(keywords_path):
+        with open(keywords_path, "r") as f:
+            keywords = json.load(f)
+        expense_keywords = [word.lower() for word in keywords.get("expense_keywords", [])]
+        income_keywords = [word.lower() for word in keywords.get("income_keywords", [])]
+    else:
+        expense_keywords = []
+        income_keywords = []
 
     transactions = []
-    current_date = None
-    current_amount = None
-    current_desc = []
-
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
             lines = page.extract_text().splitlines()
-
             for line in lines:
-                # Match a line starting with a date and ending with € amount
                 match = re.match(r"^(\d{2}\.\d{2}\.\d{4}) (.+?) (-?\d+,\d{2}) €?$", line)
                 if match:
                     date_str, desc, amount_str = match.groups()
                     try:
                         date = datetime.strptime(date_str, "%d.%m.%Y").strftime("%Y-%m-%d")
                         amount = float(amount_str.replace(".", "").replace(",", "."))
+                        desc_lower = desc.lower()
+
+                        # Normalize amount sign
+                        if amount > 0:
+                            if any(word in desc_lower for word in expense_keywords):
+                                amount = -abs(amount)
+                            elif any(word in desc_lower for word in income_keywords):
+                                amount = abs(amount)
+                            else:
+                                amount = -abs(amount)
+
                         transactions.append({
                             "date": date,
                             "amount": amount,
@@ -98,9 +170,7 @@ def parse_bank_pdf(file_path: str) -> List[Dict]:
                     except Exception as e:
                         print(f"⚠️ Parsing error: {e}")
                         continue
-
     return transactions
-
 
 # -----------------------------------------
 # 🧾 Tool: Record a New Income Source
@@ -109,7 +179,7 @@ def parse_bank_pdf(file_path: str) -> List[Dict]:
 @register_tool(tags=["budgeting"])
 def record_income_source(source_name: str, amount: float) -> str:
     """
-    Adds a new income source with the amount provided.
+    Adds a new income source to default_profile.json under 'income_sources'.
     Stores all sources in a JSON file.
 
     Args:
@@ -120,25 +190,14 @@ def record_income_source(source_name: str, amount: float) -> str:
         Confirmation message
     """
     try:
-        income_entry = {
-            "source": source_name,
-            "amount": round(amount, 2)
-        }
-
-        try:
-            with open("data/income_sources.json", "r") as f:
-                income_list = json.load(f)
-        except FileNotFoundError:
-            income_list = []
-
-        income_list.append(income_entry)
-
-        with open("data/income_sources.json", "w") as f:
-            json.dump(income_list, f, indent=2)
-
+        profile = _load_profile()
+        sources = profile.get("income_sources", [])
+        sources.append({"source": source_name, "amount": round(amount, 2)})
+        profile["income_sources"] = sources
+        _save_profile(profile)
         return f"Income source '{source_name}' of €{amount:.2f} recorded successfully."
     except Exception as e:
-        return f"Error recording income source: {str(e)}"
+        return f"Error recording income source: {e}"
     
 # -----------------------------------------
 # 💼 Tool: Record Base Salary
@@ -147,7 +206,7 @@ def record_income_source(source_name: str, amount: float) -> str:
 @register_tool(tags=["budgeting"])
 def record_income(amount: float) -> str:
     """
-    Records the user's monthly income for budget calculation.
+    Records the user's monthly income into default_profile.json under 'income'.
     
     Args:
         amount: Monthly income in euros or rupees
@@ -156,11 +215,12 @@ def record_income(amount: float) -> str:
         Confirmation message
     """
     try:
-        with open("data/user_income.json", "w") as f:
-            json.dump({"income": round(amount, 2)}, f, indent=2)
+        profile = _load_profile()
+        profile["income"] = round(amount, 2)
+        _save_profile(profile)
         return f"Income of €{amount:.2f} recorded successfully."
     except Exception as e:
-        return f"Failed to record income: {str(e)}"
+        return f"Failed to record income: {e}"
 
 # ----------------------------
 # 💳 Tool: Record Transaction
@@ -168,6 +228,11 @@ def record_income(amount: float) -> str:
 
 @register_tool(tags=["budgeting"])
 def record_transaction(date: str, amount: float, description: str, category: str = "uncategorized") -> Dict:
+    """
+    Records a new transaction with correct sign normalization based on category type.
+    Handles dynamic addition of new categories if missing.
+    """
+
     from datetime import datetime, timedelta
     import os
     import json
@@ -185,17 +250,41 @@ def record_transaction(date: str, amount: float, description: str, category: str
             raise ValueError(f"Invalid date format: '{date}'.")
 
     # Load category → type mapping
+    mapping_path = "data/category_type_mapping.json"
     try:
-        with open("data/category_type_mapping.json", "r") as f:
+        with open(mapping_path, "r") as f:
             mapping = json.load(f)
     except FileNotFoundError:
         mapping = {}
 
     category_normalized = category.strip().title()
-    type_ = mapping.get(category_normalized, "uncategorized")
+    type_ = mapping.get(category_normalized)
 
-    if type_ == "uncategorized":
-        print(f"⚠️ Warning: No type found for category '{category_normalized}'.")
+    if not type_:
+        print(f"⚠️ Warning: Category '{category_normalized}' not found in mapping.")
+        decision = input("🛠️ Would you like to define this category now? [yes/no]: ").strip().lower()
+        if decision == "yes":
+            type_ = input("🔵 Enter type for this category (Needs/Wants/Savings): ").strip().title()
+            if type_ not in ["Needs", "Wants", "Savings"]:
+                print("❌ Invalid type entered. Defaulting category to 'uncategorized'.")
+                type_ = "uncategorized"
+            else:
+                # Save the new category mapping
+                mapping[category_normalized] = type_
+                with open(mapping_path, "w") as f:
+                    json.dump(mapping, f, indent=2)
+                print(f"✅ Added '{category_normalized}' as {type_}.")
+        else:
+            type_ = "uncategorized"
+            print(f"⚠️ Proceeding with type 'uncategorized'.")
+
+    # Normalize amount based on type
+    if type_ in ["Needs", "Wants"]:
+        amount = -abs(amount)
+    elif type_ == "Savings":
+        amount = abs(amount)
+    else:
+        amount = -abs(amount)
 
     # Create transaction object
     transaction = {
@@ -210,7 +299,7 @@ def record_transaction(date: str, amount: float, description: str, category: str
     # Save to global transaction DB
     os.makedirs("data", exist_ok=True)
     try:
-         with open("data/transactions.json", "r") as f:
+        with open("data/transactions.json", "r") as f:
             content = f.read().strip()
             existing = json.loads(content) if content else []
     except FileNotFoundError:
@@ -266,86 +355,33 @@ def categorize_transactions(transactions: Union[str, List[Dict]]) -> List[Dict]:
 # 📊 Tool: Summarize Budget
 # ----------------------------
 @register_tool(tags=["budgeting"])
-def summarize_budget() -> Dict:
+def summarize_budget(transactions: List[Dict], budgets: Dict[str, Dict[str, float]], month: str) -> str:
     """
     Summarizes the user's spending against the 50/30/20 budget rule.
-    Loads transactions and income from persistent storage.
+    Loads transactions and income from default_profile.json.
     """
-    try:
-        with open("data/transactions.json", "r") as f:
-            transactions = json.load(f)
-    except FileNotFoundError:
-        return {"message": "No transactions database found."}
-    except json.JSONDecodeError:
-        return {"message": "Transactions database is corrupted."}
-
-    # 🔍 Filter only valid categorized transactions
-    categorized_transactions = [
-        tx for tx in transactions
-        if tx.get("type", "").lower() in {"needs", "wants", "savings"}
-    ]
-
-    if not categorized_transactions:
-        return {"message": "No categorized transactions found in database."}
-
-    # 💰 Load income data
-    total_income = 0.0
-    sources = []
-
-    try:
-        with open("data/user_income.json", "r") as f:
-            salary_data = json.load(f)
-            income = salary_data.get("income", 0)
-            if income:
-                total_income += income
-                sources.append({"source": "salary", "amount": income})
-    except FileNotFoundError:
-        pass
-
-    try:
-        with open("data/income_sources.json", "r") as f:
-            extras = json.load(f)
-            total_income += sum(x["amount"] for x in extras)
-            sources.extend(extras)
-    except FileNotFoundError:
-        pass
-
-    if total_income == 0:
-        return {"message": "No income found to base the budget on."}
-
-    # 🎯 Apply 50/30/20 rule
-    limits = {
-        "needs": round(total_income * 0.50, 2),
-        "wants": round(total_income * 0.30, 2),
-        "savings": round(total_income * 0.20, 2)
-    }
-
-    spent = {"needs": 0, "wants": 0, "savings": 0}
-    for tx in categorized_transactions:
-        cat = tx.get("type", "").lower()
-        amt = abs(tx.get("amount", 0))
-        if cat in spent:
-            spent[cat] += amt
-
-    over_budget = {
-        k: round(spent[k] - limits[k], 2)
-        for k in spent if spent[k] > limits[k]
-    }
-
-    under_budget = {
-        k: round(limits[k] - spent[k], 2)
-        for k in spent if spent[k] <= limits[k]
-    }
-
-    return {
-        "income_sources": sources,
-        "total_income": round(total_income, 2),
-        "budget_limits": limits,
-        "actual_spending": spent,
-        "over_budget": over_budget,
-        "under_budget": under_budget,
-        "message": "Budget summary calculated from persistent transaction database."
-    }
+    if month not in budgets:
+        return f"No budgets for {month}."
+    budget_for_month = budgets[month]
+    spent = {}
+    # sum spend per category
+    for tx in transactions:
+        date = tx.get("date","")
+        if not date.startswith(month):
+            continue
+        cat = tx.get("category","Unknown").strip().title()
+        amt = tx.get("amount", 0)
+        if isinstance(amt,(int,float)):
+            spent[cat] = spent.get(cat, 0.0) + amt
+    # union of categories
+    all_cats = set(budget_for_month.keys()) | set(spent.keys())
+    lines = []
+    for cat in sorted(all_cats):
+        s = spent.get(cat, 0.0)
+        b = budget_for_month.get(cat, 0.0)
+        status = "under" if s <= b else "over"
+        lines.append(f"{cat}: spent {s:.1f} of {b:.1f}, {status} budget.")
+    return "\n".join(lines)
 
 # -------------------------------
 # 📊 Tool: Summarize Incomes
@@ -360,33 +396,19 @@ def summarize_income() -> Dict:
     """
     sources = []
 
-    # 1. Load base salary from user_income.json
-    try:
-        with open("data/user_income.json", "r") as f:
-            salary_data = json.load(f)
-            salary_amount = salary_data.get("income", 0)
-            if salary_amount > 0:
-                sources.append({"source": "salary", "amount": salary_amount})
-    except FileNotFoundError:
-        salary_amount = 0
+    # 1. Load base salary from default_profile.json
+    profile = _load_profile()
+    sources = []
+    if profile.get("income",0) > 0:
+        sources.append({"source":"salary","amount":profile["income"]})
+    sources.extend(profile.get("income_sources",[]))
 
-    # 2. Load extra income sources from income_sources.json
-    try:
-        with open("data/income_sources.json", "r") as f:
-            other_sources = json.load(f)
-            sources.extend(other_sources)
-    except FileNotFoundError:
-        pass
-
-    # 3. Compute total income
-    total = sum(entry["amount"] for entry in sources)
-
+    total = sum(src.get("amount",0) for src in sources)
     return {
-        "total_income": round(total, 2),
+        "total_income": round(total,2),
         "sources": sources,
-        "message": f"Total income: €{round(total, 2)}"
+        "message": f"Total income: €{round(total,2)}"
     }
-
 
 # ----------------------------
 # 📊 Tool: Update transactions
@@ -609,23 +631,37 @@ def import_pdf_transactions(file_path: str) -> Dict:
 @register_tool(tags=["budgeting", "autocategorize", "auto", "clean_uncategorized", "smart_categorization"])
 def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> Dict:
     """
-    - Auto-categorizes transactions using keyword rules and LLM fallback.
-    - Auto-categorizes all transactions with type 'uncategorized'.
-    - First attempts keyword matching. If that fails, uses LLM to guess category.
-    - Prompts user before applying changes.
-    Can be run:
-    - Before budget summary
-    - Or directly by user request
+    Auto-categorizes transactions using keyword rules, LLM fallback, and dynamic category updates.
+
+    - Processes all transactions with type 'uncategorized'.
+    - First attempts keyword-based matching using known merchant keywords.
+    - If keyword matching fails, falls back to LLM suggestion for category guessing.
+    - Prompts the user for confirmation or manual correction before updating each transaction.
+    - Dynamically saves new category-to-type mappings into category_type_mapping.json if the user defines them.
+    - Enforces correct amount signs based on assigned transaction type:
+        • Needs/Wants → Negative amounts
+        • Savings → Positive amounts
+    - Saves updated transactions and updated category mappings automatically.
+
+    This tool can be run:
+    - Before budget summarization (to ensure clean categorized data)
+    - Directly by user request to clean up uncategorized entries
 
     Args:
-        transactions (optional): Provide a list of uncategorized transactions.
-                                 If None, it loads from the database and filters uncategorized ones.
+        transactions (Optional[List[Dict]]): 
+            List of transactions to process. 
+            If None, loads transactions from the local database (transactions.json).
 
     Returns:
-        Dict with update counts or confirmation message.
+        Dict: Summary containing update counts and status message.
     """
+    import os
+    import json
+    from tools.budgeting_tools import llm_client
 
     db_path = "data/transactions.json"
+    mapping_path = "data/category_type_mapping.json"
+
     try:
         with open(db_path, "r") as f:
             transactions = json.load(f)
@@ -633,29 +669,29 @@ def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> D
         return {"message": "No transaction database found."}
 
     try:
-        with open("data/category_type_mapping.json", "r") as f:
+        with open(mapping_path, "r") as f:
             category_map = json.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         category_map = {}
+
+    keyword_map = {
+        "groceries": ["rewe", "edeka", "aldi", "dm", "apotheke", "drillisch"],
+        "subscriptions": ["netflix", "spotify", "vodafone", "pyur"],
+        "commute": ["db vertrieb", "flixbus", "bahn"],
+        "debt": ["klarna", "advanzia", "loan"],
+        "health": ["fit one", "gym"],
+        "house expenses": ["wohnung", "miete", "landeshochschulkasse"]
+    }
 
     updated = []
     skipped = []
 
     for tx in transactions:
-        if tx.get("type") == "uncategorized":
-            desc = tx["description"].lower()
+        if tx.get("type", "").lower() == "uncategorized":
+            desc = tx.get("description", "").lower()
+            matched_category = None
 
             # Step 1: Keyword Rule Matching
-            keyword_map = {
-                "groceries": ["rewe", "edeka", "aldi", "dm", "apotheke", "drillisch"],
-                "subscriptions": ["netflix", "spotify", "vodafone", "pyur"],
-                "commute": ["db vertrieb", "flixbus", "bahn"],
-                "debt": ["klarna", "advanzia", "loan"],
-                "health": ["fit one", "gym"],
-                "house expenses": ["wohnung", "miete", "landeshochschulkasse"],
-            }
-
-            matched_category = None
             for category, keywords in keyword_map.items():
                 if any(k in desc for k in keywords):
                     matched_category = category.title()
@@ -663,47 +699,87 @@ def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> D
 
             # Step 2: Fallback to LLM if needed
             if not matched_category:
-                print(f"\n🤖 LLM guessing for: {tx['description']} | {tx['amount']}")
+                prompt = f"""You are a financial assistant helping to categorize bank transactions.
+                                Your task:
+                                - Classify the following transaction into exactly ONE category like Groceries, Commute, Subscriptions, 
+                                  Debt, Health, Clothing, Entertainment, House Expenses, or Savings.
+                                - Respond ONLY with the category name.
+                                - No explanation. No sentences. Only the category word.
+
+                                Transaction details:
+                                - Description: {tx.get('description')}
+                                - Amount: {tx.get('amount')}
+                                - Date: {tx.get('date')}
+
+                                Answer with ONLY the category word.
+                         """
                 try:
-                    prompt = f"""You are a financial assistant.
-Classify this transaction into a category like Groceries, Commute, Subscriptions, Debt, Health, Clothing, Entertainment, or House Expenses.
-
-Transaction: '{tx['description']}' | Amount: {tx['amount']} | Date: {tx['date']}
-
-Respond ONLY with the best-fit category name."""
                     response = llm_client.chat.completions.create(
-                        model="gpt-4",
+                        model="gpt-4-0613",
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=10
                     )
-                    matched_category = response.choices[0].message.content.strip().title()
+                    matched_raw = response.choices[0].message.content.strip()
+                    if len(matched_raw.split()) == 1:
+                        matched_category = matched_raw.title()
+                    else:
+                        print(f"⚠️ LLM returned invalid category '{matched_raw}'. Defaulting to 'Others'.")
+                        matched_category = "Others"
                 except Exception as e:
-                    print("⚠️ LLM error:", str(e))
                     matched_category = "Others"
 
-            matched_type = category_map.get(matched_category, "uncategorized")
-
-            # Confirm with user
-            print(f"\n🔍 Transaction: {tx['description']} | {tx['amount']} on {tx['date']}")
-            print(f"💡 Suggest → Category: {matched_category}, Type: {matched_type}")
-            choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
+            print(f"\n🔍 Transaction: {tx.get('description')} | {tx.get('amount')} on {tx.get('date')}")
+            print(f"💡 Suggest → Category: {matched_category}")
+            while True:
+                choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
+                if choice in ["yes", "no", "skip"]:
+                    break
+                else:
+                    print("⚠️ Please enter only 'yes', 'no', or 'skip'.")
 
             if choice == "yes":
                 tx["category"] = matched_category
-                tx["type"] = matched_type
+                tx["type"] = category_map.get(matched_category, input(f"⚙️ No type mapping found. Enter type (Needs/Wants/Savings): ").strip().title())
+
+                # Enforce correct amount sign
+                if tx["type"] in ["Needs", "Wants"]:
+                    tx["amount"] = -abs(tx["amount"])
+                elif tx["type"] == "Savings":
+                    tx["amount"] = abs(tx["amount"])
+
+                # Save new category mapping dynamically if needed
+                if matched_category not in category_map:
+                    category_map[matched_category] = tx["type"]
+
                 updated.append(tx)
+
             elif choice == "no":
                 custom_cat = input("📝 Enter custom category: ").strip().title()
                 custom_type = category_map.get(custom_cat, input(f"⚙️ No type mapping found. Enter type (Needs/Wants/Savings): ").strip().title())
                 tx["category"] = custom_cat
                 tx["type"] = custom_type
+
+                if custom_type in ["Needs", "Wants"]:
+                    tx["amount"] = -abs(tx["amount"])
+                elif custom_type == "Savings":
+                    tx["amount"] = abs(tx["amount"])
+
+                # Save new mapping
+                if custom_cat not in category_map:
+                    category_map[custom_cat] = custom_type
+
                 updated.append(tx)
+
             else:
                 skipped.append(tx)
 
-    # Save updated list
+    # Save updated transactions
     with open(db_path, "w") as f:
         json.dump(transactions, f, indent=2)
+
+    # Save updated category map
+    with open(mapping_path, "w") as f:
+        json.dump(category_map, f, indent=2)
 
     return {
         "message": f"Categorized {len(updated)} transactions. Skipped {len(skipped)}.",
@@ -717,154 +793,140 @@ Respond ONLY with the best-fit category name."""
 # File: tools/budgeting_tools.py
 
 @register_tool(tags=["budgeting", "summarize"])
-def summarize_category_spending(category: str, month_str: str) -> Dict:
+def summarize_category_spending(transactions: List[Dict], month: str, category: str) -> str:
     """
-    Tool Name: summarize_category_spending
+    Summarizes total spending for a given category and month from the transaction database.
 
-    Description:
-        Summarize spending for a given category and month (YYYY-MM).
-        If category == "All", include all categories.
+    - Expands user-requested categories into related sub-categories using category_groups.json.
+    - Filters transactions by matching the provided month against either transaction date or month field.
+    - Only negative (expense) transactions are counted toward spending totals.
+    - Ignores income (positive) transactions.
+    - Supports summarizing across all categories if the requested category is "All".
+    - Formats the output cleanly for user display.
 
-    Arguments:
-        category (str): e.g. 'Groceries', 'Clothing', or a type 'Needs', 'Wants', 'Savings', 'All'
-        month_str (str): Natural-language month filter like 'March', 'March 2025', or a YYYY-MM string.
-                         If omitted or unrecognized, defaults to all time.
+    Args:
+        transactions (List[Dict]): 
+            List of all available transactions from the database.
+        month (str): 
+            Target month in YYYY-MM format (e.g., '2025-03').
+        category (str): 
+            User-requested category to summarize (e.g., 'Food', 'Entertainment', 'All').
 
     Returns:
-        {
-            "category": <str>,
-            "month": <YYYY-MM or 'all'>,
-            "total_spent": <float>,
-            "transactions": <List[Dict]>,
-            "message": <summary string>
-        }
-        or on error:
-        {"message": "..."}
+        str: 
+            A summary sentence stating the total amount spent for the requested category and month.
     """
-    TRANSACTIONS_PATH = "data/transactions.json"
 
-    # 1) Normalize & parse month_str → YYYY-MM
-    month = None
-    if month_str:
-        m = re.search(
-            r"(january|february|march|april|may|june|july|"
-            r"august|september|october|november|december)"
-            r"(?:\s+(\d{4}))?",
-            month_str.strip(),
-            re.IGNORECASE
-        )
-        if m:
-            month_name = m.group(1).lower()
-            year = m.group(2) or str(datetime.now().year)
-            month_map = {
-                "january":"01","february":"02","march":"03","april":"04",
-                "may":"05","june":"06","july":"07","august":"08",
-                "september":"09","october":"10","november":"11","december":"12"
-            }
-            month = f"{year}-{month_map[month_name]}"
+    category_groups = load_category_groups()
+    category_input = category.strip().lower()
 
-    # 2) Normalize category/type flags
-    label = category.strip().title()
-    is_type = label in {"Needs", "Wants", "Savings"}
-    is_all  = label == "All"
+    # Expand the category into list of possible matching categories
+    expanded_categories = category_groups.get(category_input, [category_input])
+    expanded_categories = [c.lower() for c in expanded_categories]
 
-    # 3) Load transactions with robust error handling
-    try:
-        with open(TRANSACTIONS_PATH, "r") as f:
-            transactions = json.load(f)
-    except FileNotFoundError:
-        return {"message": "No transactions database found."}
-    except json.JSONDecodeError:
-        return {"message": "Transactions database is corrupted."}
-
-    # 4) Filter by month and by category/type
-    matched: List[Dict] = []
+    total_spent = 0.0
     for tx in transactions:
-        # month filter
-        if month and not tx.get("date", "").startswith(month):
+        tx_date = tx.get("date", "")
+        tx_month = tx.get("month", "")
+
+        # Filter by month
+        if not (tx_date.startswith(month) or tx_month == month):
             continue
 
-        # category/type filter
-        if is_all:
-            matched.append(tx)
-        elif is_type:
-            if tx.get("type", "").title() == label:
-                matched.append(tx)
-        else:
-            if tx.get("category", "").title() == label:
-                matched.append(tx)
+        tx_category = tx.get("category", "").strip().lower()
+        amt = tx.get("amount", 0)
 
-    # 5) Compute total spent (only sum the negative amounts, turning them positive)
-    total_spent = sum(-tx["amount"] for tx in matched
-                      if isinstance(tx.get("amount"), (int, float)) and tx["amount"] < 0)
+        if not isinstance(amt, (int, float)) or amt >= 0:
+            continue  # Only expenses (negative amounts)
 
-    # 6) Build response
-    pretty_cat = "all expenses" if is_all else label
-    period     = month          if month else "all time"
-    message    = f"You spent €{total_spent:.2f} on {pretty_cat} in {period}."
+        # Match category
+        if category_input == "all" or tx_category in expanded_categories:
+            total_spent += amt
 
-    return {
-        "category":    label,
-        "month":       month or "all",
-        "total_spent": round(total_spent, 2),
-        "transactions": matched,
-        "message":     message
-    }
+    total_spent_display = abs(total_spent)
+    pretty_category = "all categories" if category_input == "all" else category_input.title()
+
+    return f"You spent €{total_spent_display:.2f} on {pretty_category} in {month}."
 
 # -----------------------------------------
 # 📊 Tool: Query Category Spending
 # -----------------------------------------
 
-@register_tool(tags=["budgeting", "query", "spending", "category"])
-def query_category_spending(category: str, month: str = None) -> dict:
-    """
-    Tool Name: query_category_spending
-    Description:
-        Routes natural-language category queries like "groceries in March"
-        or "expenses last month" to the appropriate summarizer.
+# @register_tool(tags=["budgeting", "query", "spending", "category"])
+# def query_category_spending(nl_query: str) -> Dict:
+#     """
+#     Tool Name: query_category_spending
 
-    Args:
-        nl (str): Natural-language query, e.g. "eating out in March 2025"
+#     Description:
+#         Routes a natural-language query like "groceries in March 2025"
+#         to the summarizer.
 
-    Returns:
-        Dict with total spending, matched transactions, and summary message.
-    """
-    nl = category.strip().lower()
+#     Args:
+#         category (str): Natural phrase from user, e.g., "groceries in March"
 
-    # 1) Extract month name + optional year
-    month_regex = re.compile(
-        r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", 
-        re.IGNORECASE
-    )
-    m = month_regex.search(nl)
-    if m:
-        month_name = m.group(1).title()
-        month_num = datetime.strptime(month_name, "%B").month
-        year_match = re.search(r"\b(20\d{2})\b", nl)
-        year = int(year_match.group(1)) if year_match else datetime.now().year
-        month_str = f"{year}-{month_num:02d}"
-        # Remove the “in March” (or just “March”) from the phrase:
-        nl_cleaned = re.sub(rf"\b(in\s+)?{month_name.lower()}\b", "", nl).strip()
-    elif "last month" in nl:
-        today = datetime.today()
-        prev_month = today.month - 1 or 12
-        prev_year = today.year if today.month > 1 else today.year - 1
-        month_str = f"{prev_year}-{prev_month:02d}"
-        nl_cleaned = nl.replace("last month", "").strip()
-    else:
-        # default to this month
-        month_str = datetime.now().strftime("%Y-%m")
-        nl_cleaned = nl
+#     Returns:
+#         Dictionary with total spending, matched transactions, and summary message.
+#     """
+#     # 1) Parse category + month
+#     label, month_str = extract_month_from_phrase(nl_query)
 
-    # 2) If they asked “expenses” in general, use “All”
-    if any(tok in nl_cleaned for tok in ("expense", "spending", "total")):
-        cat = "All"
-    else:
-        # Title-case the remainder to match your categories
-        cat = nl_cleaned.title()
+#     # 2) Detect generic spending queries
+#     if any(tok in label.lower() for tok in ("expense", "spending", "total")):
+#         label = "All"
 
-    # 3) Finally call your summarizer
-    return summarize_category_spending(cat, month_str)
+#     # 3) Delegate
+#     return summarize_category_spending(label, month_str)
+
+
+# def query_category_spending(category: str, month: str = None) -> dict:
+#     """
+#     Tool Name: query_category_spending
+#     Description:
+#         Routes natural-language category queries like "groceries in March"
+#         or "expenses last month" to the appropriate summarizer.
+
+#     Args:
+#         nl (str): Natural-language query, e.g. "eating out in March 2025"
+
+#     Returns:
+#         Dict with total spending, matched transactions, and summary message.
+#     """
+#     nl = category.strip().lower()
+
+#     # 1) Extract month name + optional year
+#     month_regex = re.compile(
+#         r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", 
+#         re.IGNORECASE
+#     )
+#     m = month_regex.search(nl)
+#     if m:
+#         month_name = m.group(1).title()
+#         month_num = datetime.strptime(month_name, "%B").month
+#         year_match = re.search(r"\b(20\d{2})\b", nl)
+#         year = int(year_match.group(1)) if year_match else datetime.now().year
+#         month_str = f"{year}-{month_num:02d}"
+#         # Remove the “in March” (or just “March”) from the phrase:
+#         nl_cleaned = re.sub(rf"\b(in\s+)?{month_name.lower()}\b", "", nl).strip()
+#     elif "last month" in nl:
+#         today = datetime.today()
+#         prev_month = today.month - 1 or 12
+#         prev_year = today.year if today.month > 1 else today.year - 1
+#         month_str = f"{prev_year}-{prev_month:02d}"
+#         nl_cleaned = nl.replace("last month", "").strip()
+#     else:
+#         # default to this month
+#         month_str = datetime.now().strftime("%Y-%m")
+#         nl_cleaned = nl
+
+#     # 2) If they asked “expenses” in general, use “All”
+#     if any(tok in nl_cleaned for tok in ("expense", "spending", "total")):
+#         cat = "All"
+#     else:
+#         # Title-case the remainder to match your categories
+#         cat = nl_cleaned.title()
+
+#     # 3) Finally call your summarizer
+#     return summarize_category_spending(cat, month_str)
 
 # @register_tool(tags=["budgeting", "query", "spending", "category"])
 # def query_category_spending(category: str) -> dict:
