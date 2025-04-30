@@ -135,6 +135,24 @@ Paste the resulting URL into Notion Developer Dashboard as your webhook endpoint
 
 ---
 
+## 🗂 FinSense Notion Dashboard Template
+
+Looking for a plug-and-play workspace?
+
+🌟 Use the official FinSense Notion Template to:
+
+- Upload bank PDFs
+- Manually log transactions
+- View synced budgets and summaries
+- Chat with your FinSense agent (coming soon)
+
+📌 Access it here:  
+🔗 [FinSense Finance Dashboard (Notion Template)](https://mellow-writer-2ec.notion.site/FinSense-Finance-Dashboard-1dd8efee976f801fbaf3dc111706ca6e)
+
+Make a copy into your workspace and connect your FinSense integration.
+
+---
+
 ## 🦡 Native Notion Webhooks
 
 You can register your webhook URL at [notion.so/my-integrations](https://www.notion.so/my-integrations) to receive events like:
