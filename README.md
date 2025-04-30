@@ -96,8 +96,6 @@ This agent is designed to grow over time by:
 
 ---
 
----
-
 ## ⚙️ Setup Instructions
 
 ### 1. Clone the repo and create environment
@@ -217,7 +215,7 @@ Notion-based conversational chat UI:
 
 Built by Vasu Chukka  
 📬 Email: vasu.chukka@outlook.com  
-💻 GitHub: [github.com/vasuchukka](https://github.com/vasuchukka)
+💻 LinkedIn: [VasuChukka](https://www.linkedin.com/in/vasu-chukka-1a3569116/)
 
 Stay focused. Stay frugal. Let your agent do the math. 💸
 
