@@ -1,0 +1,17 @@
+{
+  "sampleBankStatement": {
+    "parsed_at": "2025-04-21T17:52:44.052571",
+    "num_transactions": 21,
+    "raw_file": "data/parsed_pdfs/raw/sampleBankStatement_20250421175244.json"
+  },
+  "Feb_transactions": {
+    "parsed_at": "2025-06-21T10:46:56.716584",
+    "num_transactions": 19,
+    "raw_file": "data/parsed_pdfs/raw/Feb_transactions_20250621104656.json"
+  },
+  "Jan_transactions": {
+    "parsed_at": "2025-06-21T10:46:54.463284",
+    "num_transactions": 15,
+    "raw_file": "data/parsed_pdfs/raw/Jan_transactions_20250621104654.json"
+  }
+}

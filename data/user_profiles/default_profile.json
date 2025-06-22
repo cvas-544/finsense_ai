@@ -1,0 +1,20 @@
+{
+  "salary": 3500.0,
+  "rent": 395.0,
+  "wifi": 35.0,
+  "electricity": 55.0,
+  "other_fixed_costs": [
+    {
+      "description": "Gym",
+      "amount": 35.0
+    },
+    {
+      "description": "Phone",
+      "amount": 12.0
+    },
+    {
+      "description": "Netflix",
+      "amount": 5.0
+    }
+  ]
+}
