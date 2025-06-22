@@ -17,6 +17,7 @@ from typing import List, Dict, Union, Optional
 from tools.shared_registry import register_tool
 from memory.memory_store import Memory
 from utils.date_helpers import extract_month_from_phrase
+from utils.transactions_store import get_all_transactions  # replaces extract_transactions_from_db
 
 # Initializes the OpenAI client using the API key from environment variables.
 load_dotenv()
@@ -99,23 +100,32 @@ def fuzzy_match_transaction_db(query: str) -> Optional[Dict]:
 # Tool: 🔁 Extract from Memory Helper
 # ----------------------------
 
-def extract_transactions_from_db() -> List[Dict]:
-    """
-    Loads all categorized transactions from the persistent JSON database.
+# def extract_transactions_from_db() -> List[Dict]:
+#     """
+#     Loads all categorized transactions from the persistent JSON database.
 
-    Returns:
-        A list of transactions with both 'category' and 'type' fields.
-    """
-    try:
-        with open("data/transactions.json", "r") as f:
-            transactions = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+#     Returns:
+#         A list of transactions with both 'category' and 'type' fields.
+#     """
+#     try:
+#         with open("data/transactions.json", "r") as f:
+#             transactions = json.load(f)
+#     except (FileNotFoundError, json.JSONDecodeError):
+#         return []
 
-    return [
-        tx for tx in transactions
-        if isinstance(tx, dict) and "category" in tx and "type" in tx
-    ]
+#     return [
+#         tx for tx in transactions
+#         if isinstance(tx, dict) and "category" in tx and "type" in tx
+#     ]
+
+def extract_transactions_from_db():
+    import os
+    path = "data/transactions.json"
+    print(f"📂 Reading transactions from: {os.path.abspath(path)}")
+    with open(path, "r") as f:
+        transactions = json.load(f)
+    print(f"📊 {len(transactions)} transactions loaded.")
+    return transactions
 
 # ----------------------------
 # 📄 Tool: Parse Bank PDF
@@ -288,12 +298,13 @@ def record_transaction(date: str, amount: float, description: str, category: str
 
     # Create transaction object
     transaction = {
-        "id": f"txn_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        "date": date,
-        "amount": float(amount),
-        "description": description,
-        "category": category_normalized,
-        "type": type_
+    "id": f"txn_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+    "date": date,
+    "month": date[:7], 
+    "amount": float(amount),
+    "description": description,
+    "category": category_normalized,
+    "type": type_
     }
 
     # Save to global transaction DB
@@ -792,61 +803,115 @@ def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> D
 # -----------------------------------------
 # File: tools/budgeting_tools.py
 
-@register_tool(tags=["budgeting", "summarize"])
-def summarize_category_spending(transactions: List[Dict], month: str, category: str) -> str:
-    """
-    Summarizes total spending for a given category and month from the transaction database.
+# @register_tool(tags=["budgeting", "summarize"])
+# def summarize_category_spending(transactions: List[Dict], month: str, category: str) -> str:
+#     """
+#     Summarizes total spending for a given category and month from the transaction database.
 
-    - Expands user-requested categories into related sub-categories using category_groups.json.
-    - Filters transactions by matching the provided month against either transaction date or month field.
-    - Only negative (expense) transactions are counted toward spending totals.
-    - Ignores income (positive) transactions.
-    - Supports summarizing across all categories if the requested category is "All".
-    - Formats the output cleanly for user display.
+#     - Expands user-requested categories into related sub-categories using category_groups.json.
+#     - Filters transactions by matching the provided month against either transaction date or month field.
+#     - Only negative (expense) transactions are counted toward spending totals.
+#     - Ignores income (positive) transactions.
+#     - Supports summarizing across all categories if the requested category is "All".
+#     - Formats the output cleanly for user display.
+
+#     Args:
+#         transactions (List[Dict]): 
+#             List of all available transactions from the database.
+#         month (str): 
+#             Target month in YYYY-MM format (e.g., '2025-03').
+#         category (str): 
+#             User-requested category to summarize (e.g., 'Food', 'Entertainment', 'All').
+
+#     Returns:
+#         str: 
+#             A summary sentence stating the total amount spent for the requested category and month.
+#     """
+
+#     category_groups = load_category_groups()
+#     category_input = category.strip().lower()
+
+#     # Expand the category into list of possible matching categories
+#     expanded_categories = category_groups.get(category_input, [category_input])
+#     expanded_categories = [c.lower() for c in expanded_categories]
+
+#     total_spent = 0.0
+#     for tx in transactions:
+#         tx_date = tx.get("date", "")
+#         tx_month = tx.get("month", "")
+
+#         # Filter by month
+#         if not (tx_date.startswith(month) or tx_month == month):
+#             continue
+
+#         tx_category = tx.get("category", "").strip().lower()
+#         amt = tx.get("amount", 0)
+
+#         if not isinstance(amt, (int, float)) or amt >= 0:
+#             continue  # Only expenses (negative amounts)
+
+#         # Match category
+#         if category_input == "all" or tx_category in expanded_categories:
+#             total_spent += amt
+
+#     total_spent_display = abs(total_spent)
+#     pretty_category = "all categories" if category_input == "all" else category_input.title()
+
+#     return f"You spent €{total_spent_display:.2f} on {pretty_category} in {month}."
+
+from utils.transactions_store import get_all_transactions  # Make sure this exists
+from utils.category_groups import load_category_groups     # Or wherever you load category mappings
+
+@register_tool(tags=["budgeting", "summarize"])
+def summarize_category_spending(month: str, category: str) -> str:
+    """
+    Summarizes total spending for a given category and month using the latest transaction data.
+
+    This tool:
+    - Loads transactions from disk at runtime (not from agent memory)
+    - Expands the user-requested category using category_groups.json
+    - Filters only negative (expense) transactions
+    - Supports the 'All' category for total spending
+    - Returns a human-readable summary
 
     Args:
-        transactions (List[Dict]): 
-            List of all available transactions from the database.
-        month (str): 
-            Target month in YYYY-MM format (e.g., '2025-03').
-        category (str): 
-            User-requested category to summarize (e.g., 'Food', 'Entertainment', 'All').
+        month (str): Target month in YYYY-MM format (e.g., '2025-03')
+        category (str): User-requested category to summarize (e.g., 'Groceries', 'All')
 
     Returns:
-        str: 
-            A summary sentence stating the total amount spent for the requested category and month.
+        str: Spending summary
     """
+
+    print(f"🔍 Filtering for month = {month}, category = {category.lower()}")
+
+    transactions = get_all_transactions()
+    print(f"📂 Reading transactions from memory... {len(transactions)} total records")
 
     category_groups = load_category_groups()
     category_input = category.strip().lower()
-
-    # Expand the category into list of possible matching categories
     expanded_categories = category_groups.get(category_input, [category_input])
     expanded_categories = [c.lower() for c in expanded_categories]
 
-    total_spent = 0.0
+    matched = []
     for tx in transactions:
-        tx_date = tx.get("date", "")
-        tx_month = tx.get("month", "")
-
-        # Filter by month
-        if not (tx_date.startswith(month) or tx_month == month):
-            continue
-
+        if not isinstance(tx.get("amount"), (int, float)) or tx["amount"] >= 0:
+            continue  # Skip income
+        tx_month = tx.get("month", "") or tx.get("date", "")[:7]
         tx_category = tx.get("category", "").strip().lower()
-        amt = tx.get("amount", 0)
-
-        if not isinstance(amt, (int, float)) or amt >= 0:
-            continue  # Only expenses (negative amounts)
-
-        # Match category
+        if tx_month != month:
+            continue
         if category_input == "all" or tx_category in expanded_categories:
-            total_spent += amt
+            matched.append(tx)
 
-    total_spent_display = abs(total_spent)
+    total_spent = sum(abs(tx["amount"]) for tx in matched)
     pretty_category = "all categories" if category_input == "all" else category_input.title()
+    print(f"✅ Matched {len(matched)} transactions totaling €{total_spent:.2f}")
+    
+    print(f"🔍 Filtering for month = {month}, category = {category.lower()}")
+    print(f"📂 Reading transactions... {len(transactions)} total records")
 
-    return f"You spent €{total_spent_display:.2f} on {pretty_category} in {month}."
+    return f"You spent €{total_spent:.2f} on {pretty_category} in {month}."
+
 
 # -----------------------------------------
 # 📊 Tool: Query Category Spending
