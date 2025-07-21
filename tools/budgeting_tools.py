@@ -8,6 +8,7 @@ Description: Cleaned and enhanced version of budgeting tools module.
 
 import re
 import os
+import uuid
 import json, calendar
 import pdfplumber
 from openai import OpenAI
@@ -16,8 +17,12 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Union, Optional
 from tools.shared_registry import register_tool
 from memory.memory_store import Memory
+
+
 from utils.date_helpers import extract_month_from_phrase
 from utils.transactions_store import get_all_transactions  # replaces extract_transactions_from_db
+from utils.db_connection import get_db_connection
+from utils.category_groups import load_merged_category_groups
 
 # Initializes the OpenAI client using the API key from environment variables.
 load_dotenv()
@@ -31,70 +36,52 @@ TRANSACTIONS_PATH = "data/transactions.json"
 # ----------------------------
 # Tool: 🧠 Profile loader
 # ----------------------------
-PROFILE_PATH = "data/default_profile.json"
-
 def _load_profile() -> Dict:
-    os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
-    try:
-        with open(PROFILE_PATH, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return {}  # Deprecated: Previously used local JSON
 
 def _save_profile(profile: Dict):
-    with open(PROFILE_PATH, "w") as f:
-        json.dump(profile, f, indent=2)
+    pass  # Deprecated: Previously used local JSON
 
-# ------------------------------
-# Tool: 🗂️ Load Category Groups
-# ------------------------------
-def load_category_groups() -> Dict[str, List[str]]:
-    path = "data/category_groups.json"
-    if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-    else:
-        return {}
+    
+# ----------------------------
+# Tool: 🗂️ Add User Category Keyword
+# ----------------------------
 
-# ----------------------------
-# Tool: 🗓️ Parse Month
-# ----------------------------
-def _parse_month(month_str: str) -> str:
-    m = re.search(
-        r"(january|february|march|april|may|june|july|"
-        r"august|september|october|november|december)"
-        r"(?:\s+(\d{4}))?",
-        month_str.strip(),
-        re.IGNORECASE
-    )
-    if not m:
-        return None
-    month_name = m.group(1).lower()
-    year = m.group(2) or str(datetime.now().year)
-    month_map = {name: f"{idx:02d}" for idx, name in enumerate(calendar.month_name) if idx}
-    return f"{year}-{month_map[month_name]}"
+@register_tool(tags=["categorization", "user_keywords"])
+def add_user_category_keyword(user_id: str, group_name: str, keyword: str) -> str:
+    """
+    Adds a new keyword to a user's category group.
+
+    Args:
+        user_id: UUID of the user
+        group_name: Category group (e.g. 'food', 'health')
+        keyword: New keyword to associate
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_category_keywords (user_id, group_name, keyword)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, keyword) DO NOTHING
+        """, (user_id, group_name.lower(), keyword.lower()))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"✅ Added keyword '{keyword}' to group '{group_name}' for user {user_id}."
+    except Exception as e:
+        return f"❌ Failed to add keyword: {e}"
+
 
 # ----------------------------
 # Tool: 🧠 Fuzzy Match Helper
 # ----------------------------
 
 def fuzzy_match_transaction_db(query: str) -> Optional[Dict]:
-    try:
-        with open("data/transactions.json", "r") as f:
-            transactions = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-    for tx in reversed(transactions):
-        desc = tx.get("description", "").lower()
-        amt = str(tx.get("amount"))
-
-        if query.lower() in desc or query.strip() == amt:
-            return tx
-    return None
+    return None  # Deprecated: Previously matched against local JSON
 
 # ----------------------------
 # Tool: 🔁 Extract from Memory Helper
@@ -119,43 +106,41 @@ def fuzzy_match_transaction_db(query: str) -> Optional[Dict]:
 #     ]
 
 def extract_transactions_from_db():
-    import os
-    path = "data/transactions.json"
-    print(f"📂 Reading transactions from: {os.path.abspath(path)}")
-    with open(path, "r") as f:
-        transactions = json.load(f)
-    print(f"📊 {len(transactions)} transactions loaded.")
-    return transactions
+    return []  # Deprecated: Previously extracted from local JSON
 
 # ----------------------------
 # 📄 Tool: Parse Bank PDF
 # ----------------------------
 
 @register_tool(tags=["budgeting"])
-def parse_bank_pdf(file_path: str) -> List[Dict]:
-    import pdfplumber
-    import re
-    from datetime import datetime
-    import json
-    import os
+def parse_bank_pdf(user_id: str, file_path: str) -> Dict:
+    """
+    Parses a PDF bank statement and inserts parsed transactions into the RDS database.
 
-    # Load dynamic keyword list
-    keywords_path = "data/expense_income_keywords.json"
-    if os.path.exists(keywords_path):
-        with open(keywords_path, "r") as f:
+    Args:
+        user_id (str): UUID of the user who owns the transactions.
+        file_path (str): Path to the PDF bank statement file.
+
+    Returns:
+        Dict: Summary of imported transactions.
+    """
+    # Load keyword list
+    expense_keywords = []
+    income_keywords = []
+    try:
+        with open("data/expense_income_keywords.json", "r") as f:
             keywords = json.load(f)
-        expense_keywords = [word.lower() for word in keywords.get("expense_keywords", [])]
-        income_keywords = [word.lower() for word in keywords.get("income_keywords", [])]
-    else:
-        expense_keywords = []
-        income_keywords = []
+            expense_keywords = [w.lower() for w in keywords.get("expense_keywords", [])]
+            income_keywords = [w.lower() for w in keywords.get("income_keywords", [])]
+    except Exception as e:
+        print(f"⚠️ Could not load keyword mapping: {e}")
 
     transactions = []
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
             lines = page.extract_text().splitlines()
             for line in lines:
-                match = re.match(r"^(\d{2}\.\d{2}\.\d{4}) (.+?) (-?\d+,\d{2}) €?$", line)
+                match = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+(-?\d+,\d{2})\s?€?$", line)
                 if match:
                     date_str, desc, amount_str = match.groups()
                     try:
@@ -173,64 +158,88 @@ def parse_bank_pdf(file_path: str) -> List[Dict]:
                                 amount = -abs(amount)
 
                         transactions.append({
+                            "transaction_id": str(uuid.uuid4()),
+                            "user_id": user_id,
                             "date": date,
                             "amount": amount,
-                            "description": desc.strip()
+                            "description": desc.strip(),
+                            "category": "uncategorized",
+                            "type": "uncategorized",
+                            "month": date[:7]
                         })
                     except Exception as e:
-                        print(f"⚠️ Parsing error: {e}")
-                        continue
-    return transactions
+                        print(f"⚠️ Parsing error on line: '{line}' → {e}")
+
+    # Insert transactions into DB
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        inserted = 0
+        for tx in transactions:
+            try:
+                cur.execute("""
+                    INSERT INTO transactions (
+                        transaction_id, user_id, date, amount, description, category, type, month
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    tx["transaction_id"], tx["user_id"], tx["date"], tx["amount"],
+                    tx["description"], tx["category"], tx["type"], tx["month"]
+                ))
+                inserted += 1
+            except Exception as e:
+                print(f"⚠️ Failed to insert transaction: {e}")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {
+            "message": f"✅ Imported {inserted} transactions from {os.path.basename(file_path)}.",
+            "inserted": inserted,
+            "failed": len(transactions) - inserted
+        }
+
+    except Exception as e:
+        return {"message": f"❌ Database error: {e}"}
+
 
 # -----------------------------------------
 # 🧾 Tool: Record a New Income Source
 # -----------------------------------------
 
 @register_tool(tags=["budgeting"])
-def record_income_source(source_name: str, amount: float) -> str:
+def record_income_source(user_id: str, source_name: str, amount: float) -> str:
     """
-    Adds a new income source to default_profile.json under 'income_sources'.
-    Stores all sources in a JSON file.
+    Adds a new income source to the RDS `other_income` table.
 
     Args:
+        user_id: UUID of the user.
         source_name: Name of the income source (e.g., 'freelance', 'rental')
         amount: Amount received from this source
 
     Returns:
         Confirmation message
     """
-    try:
-        profile = _load_profile()
-        sources = profile.get("income_sources", [])
-        sources.append({"source": source_name, "amount": round(amount, 2)})
-        profile["income_sources"] = sources
-        _save_profile(profile)
-        return f"Income source '{source_name}' of €{amount:.2f} recorded successfully."
-    except Exception as e:
-        return f"Error recording income source: {e}"
-    
-# -----------------------------------------
-# 💼 Tool: Record Base Salary
-# -----------------------------------------
+    from utils.db_connection import get_db_connection
 
-@register_tool(tags=["budgeting"])
-def record_income(amount: float) -> str:
-    """
-    Records the user's monthly income into default_profile.json under 'income'.
-    
-    Args:
-        amount: Monthly income in euros or rupees
-    
-    Returns:
-        Confirmation message
-    """
     try:
-        profile = _load_profile()
-        profile["income"] = round(amount, 2)
-        _save_profile(profile)
-        return f"Income of €{amount:.2f} recorded successfully."
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO other_income (user_id, source_name, amount)
+            VALUES (%s, %s, %s)
+        """, (user_id, source_name.strip().title(), round(amount, 2)))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return f"✅ Income source '{source_name.strip().title()}' of €{amount:.2f} recorded successfully for user {user_id}."
+
     except Exception as e:
-        return f"Failed to record income: {e}"
+        return f"❌ Error recording income source: {e}"
 
 # ----------------------------
 # 💳 Tool: Record Transaction
@@ -240,12 +249,8 @@ def record_income(amount: float) -> str:
 def record_transaction(date: str, amount: float, description: str, category: str = "uncategorized") -> Dict:
     """
     Records a new transaction with correct sign normalization based on category type.
-    Handles dynamic addition of new categories if missing.
+    Inserts into RDS instead of local file.
     """
-
-    from datetime import datetime, timedelta
-    import os
-    import json
 
     # Normalize date
     date = date.lower().strip()
@@ -279,7 +284,6 @@ def record_transaction(date: str, amount: float, description: str, category: str
                 print("❌ Invalid type entered. Defaulting category to 'uncategorized'.")
                 type_ = "uncategorized"
             else:
-                # Save the new category mapping
                 mapping[category_normalized] = type_
                 with open(mapping_path, "w") as f:
                     json.dump(mapping, f, indent=2)
@@ -296,35 +300,45 @@ def record_transaction(date: str, amount: float, description: str, category: str
     else:
         amount = -abs(amount)
 
-    # Create transaction object
-    transaction = {
-    "id": f"txn_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-    "date": date,
-    "month": date[:7], 
-    "amount": float(amount),
-    "description": description,
-    "category": category_normalized,
-    "type": type_
-    }
+    user_id = "00000000-0000-0000-0000-000000000000"  # Temporary user_id for now
 
-    # Save to global transaction DB
-    os.makedirs("data", exist_ok=True)
     try:
-        with open("data/transactions.json", "r") as f:
-            content = f.read().strip()
-            existing = json.loads(content) if content else []
-    except FileNotFoundError:
-        existing = []
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    existing.append(transaction)
+        cur.execute("""
+            INSERT INTO transactions (
+                transaction_id, user_id, date, amount, description, category, type, month
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+        """, (
+            str(uuid.uuid4()), user_id, date, amount, description,
+            category_normalized, type_, date[:7]
+        ))
 
-    with open("data/transactions.json", "w") as f:
-        json.dump(existing, f, indent=2)
+        conn.commit()
+        cur.close()
+        conn.close()
 
-    return {
-        "message": f"Transaction recorded under {category_normalized} ({type_}).",
-        "transaction": transaction
-    }
+        return {
+            "message": f"Transaction recorded under {category_normalized} ({type_}).",
+            "transaction": {
+                "date": date,
+                "amount": amount,
+                "description": description,
+                "category": category_normalized,
+                "type": type_,
+                "month": date[:7]
+            }
+        }
+
+    except Exception as e:
+        print(f"❌ Error inserting transaction into RDS: {e}")
+        return {
+            "message": "Error recording transaction.",
+            "error": str(e)
+        }
 
 # ----------------------------
 # 🧾 Tool: Categorize Transactions
@@ -365,61 +379,141 @@ def categorize_transactions(transactions: Union[str, List[Dict]]) -> List[Dict]:
 # ----------------------------
 # 📊 Tool: Summarize Budget
 # ----------------------------
-@register_tool(tags=["budgeting"])
-def summarize_budget(transactions: List[Dict], budgets: Dict[str, Dict[str, float]], month: str) -> str:
+@register_tool(tags=["budgeting", "summarize"])
+def summarize_budget(user_id: str, month: str) -> str:
     """
-    Summarizes the user's spending against the 50/30/20 budget rule.
-    Loads transactions and income from default_profile.json.
+    Summarizes the user's spending against the 50/30/20 budget rule for a given month.
+
+    - Retrieves income and ratio from user_profile table
+    - Sums expenses from transactions table grouped by type
+    - Compares actual vs budget for Needs/Wants/Savings
+    - Returns human-readable summary
+
+    Args:
+        user_id (str): UUID of the user.
+        month (str): Target month in YYYY-MM format.
+
+    Returns:
+        str: Budget summary text.
     """
-    if month not in budgets:
-        return f"No budgets for {month}."
-    budget_for_month = budgets[month]
-    spent = {}
-    # sum spend per category
-    for tx in transactions:
-        date = tx.get("date","")
-        if not date.startswith(month):
-            continue
-        cat = tx.get("category","Unknown").strip().title()
-        amt = tx.get("amount", 0)
-        if isinstance(amt,(int,float)):
-            spent[cat] = spent.get(cat, 0.0) + amt
-    # union of categories
-    all_cats = set(budget_for_month.keys()) | set(spent.keys())
-    lines = []
-    for cat in sorted(all_cats):
-        s = spent.get(cat, 0.0)
-        b = budget_for_month.get(cat, 0.0)
-        status = "under" if s <= b else "over"
-        lines.append(f"{cat}: spent {s:.1f} of {b:.1f}, {status} budget.")
-    return "\n".join(lines)
+    from utils.db_connection import get_db_connection
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1. Fetch user monthly income and budget preference
+        cur.execute("""
+            SELECT monthly_income, budget_ratio_choice
+            FROM user_profile
+            WHERE user_id = %s
+        """, (user_id,))
+        result = cur.fetchone()
+        if not result:
+            return f"❌ User profile not found for user_id {user_id}."
+
+        monthly_income, ratio = result
+        if not monthly_income or monthly_income <= 0:
+            return f"❌ Monthly income is not set for this user."
+
+        # 2. Parse budget ratios
+        ratio_parts = [float(r) for r in ratio.split("/")]
+        if len(ratio_parts) != 3 or sum(ratio_parts) != 100:
+            return f"❌ Invalid budget ratio format: {ratio}"
+
+        budget = {
+            "Needs": monthly_income * ratio_parts[0] / 100,
+            "Wants": monthly_income * ratio_parts[1] / 100,
+            "Savings": monthly_income * ratio_parts[2] / 100
+        }
+
+        # 3. Sum spending by type from transactions table
+        cur.execute("""
+            SELECT type, SUM(amount)
+            FROM transactions
+            WHERE user_id = %s AND month = %s AND amount < 0
+            GROUP BY type
+        """, (user_id, month))
+        rows = cur.fetchall()
+
+        actual = {"Needs": 0, "Wants": 0, "Savings": 0}
+        for t_type, amt in rows:
+            t_type = t_type.title()
+            if t_type in actual:
+                actual[t_type] += abs(amt)
+
+        cur.close()
+        conn.close()
+
+        # 4. Compose summary
+        lines = [f"📊 Budget summary for {month}:"]
+        for t in ["Needs", "Wants", "Savings"]:
+            a = actual.get(t, 0)
+            b = budget.get(t, 0)
+            status = "✅ under" if a <= b else "⚠️ over"
+            lines.append(f"- {t}: spent €{a:.2f} of €{b:.2f} ({status})")
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"❌ Failed to summarize budget: {e}"
 
 # -------------------------------
 # 📊 Tool: Summarize Incomes
 # -------------------------------
 
 @register_tool(tags=["budgeting"])
-def summarize_income() -> Dict:
+def summarize_income(user_id: str) -> Dict:
     """
-    Combines base salary and all income sources.
+    Summarizes the total income for a user by combining:
+    - Monthly base salary from user_profile
+    - Additional income sources from other_income table
+
+    Args:
+        user_id (str): UUID of the user
+
     Returns:
-        A dictionary with total income and breakdown by source.
+        Dict: Summary with total income and income sources
     """
-    sources = []
+    from utils.db_connection import get_db_connection
 
-    # 1. Load base salary from default_profile.json
-    profile = _load_profile()
-    sources = []
-    if profile.get("income",0) > 0:
-        sources.append({"source":"salary","amount":profile["income"]})
-    sources.extend(profile.get("income_sources",[]))
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    total = sum(src.get("amount",0) for src in sources)
-    return {
-        "total_income": round(total,2),
-        "sources": sources,
-        "message": f"Total income: €{round(total,2)}"
-    }
+        # Base salary
+        cur.execute("SELECT monthly_income FROM user_profile WHERE user_id = %s", (user_id,))
+        base_result = cur.fetchone()
+        base_income = base_result[0] if base_result else 0.0
+        sources = []
+        if base_income > 0:
+            sources.append({"source": "Salary", "amount": float(base_income)})
+
+        # Other income sources
+        cur.execute("""
+            SELECT source_name, amount FROM other_income
+            WHERE user_id = %s
+        """, (user_id,))
+        rows = cur.fetchall()
+        for source_name, amount in rows:
+            sources.append({"source": source_name, "amount": float(amount)})
+
+        cur.close()
+        conn.close()
+
+        total = sum(s["amount"] for s in sources)
+        return {
+            "total_income": round(total, 2),
+            "sources": sources,
+            "message": f"Total income: €{round(total, 2)}"
+        }
+
+    except Exception as e:
+        return {
+            "message": "❌ Failed to summarize income.",
+            "error": str(e),
+            "total_income": 0.0,
+            "sources": []
+        }
 
 # ----------------------------
 # 📊 Tool: Update transactions
@@ -427,6 +521,7 @@ def summarize_income() -> Dict:
 
 @register_tool(tags=["budgeting"])
 def update_transaction(
+    user_id: str,
     transaction_match: str,
     new_description: Optional[str] = None,
     new_amount: Optional[Union[float, str]] = None,
@@ -435,73 +530,95 @@ def update_transaction(
     new_type: Optional[str] = None
 ) -> str:
     """
-    Updates details of an existing transaction already stored in the database.
+    Updates details of an existing transaction already stored in the RDS database.
 
     This tool is intended for user-initiated edits to transaction fields like amount, description, category, or date.
-    It should be used when the user clearly wants to modify something (e.g., "Change Edeka to 50€" or "Update March rent to Housing").
 
     ⚠️ Do NOT use this tool for initial classification or fuzzy guessing.
     For categorization purposes, use `categorize_transactions()` or `auto_categorize_transactions()` instead.
 
     Args:
-        transaction_match: Partial string to match the existing transaction's description.
-        new_description: New merchant or label (optional).
-        new_amount: Updated amount (optional).
-        new_date: Updated date (e.g. 'today', 'yesterday', or YYYY-MM-DD).
-        new_category: Updated fine-grained category (e.g. 'Groceries').
-        new_type: Explicit budgeting type if provided (e.g. 'Needs').
+        user_id (str): ID of the user.
+        transaction_match (str): Partial string to match the transaction's description.
+        new_description (Optional[str]): Updated description.
+        new_amount (Optional[Union[float, str]]): Updated amount.
+        new_date (Optional[str]): Updated date.
+        new_category (Optional[str]): Updated category.
+        new_type (Optional[str]): Explicit type (Needs/Wants/Savings).
 
     Returns:
-        A confirmation message if updated, or a friendly error if not found.
+        str: Update status.
     """
-   # Load existing transactions
+
     try:
-        with open("data/transactions.json", "r") as f:
-            transactions = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return f"No transaction database found."
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    updated = False
-    for tx in transactions:
-        if transaction_match.lower() in tx.get("description", "").lower():
-            if new_description:
-                tx["description"] = new_description
-            if new_amount:
-                try:
-                    tx["amount"] = float(new_amount)
-                except ValueError:
-                    return "Invalid amount format."
-            if new_date:
-                if new_date == "today":
-                    tx["date"] = datetime.now().strftime("%Y-%m-%d")
-                elif new_date == "yesterday":
-                    tx["date"] = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-                else:
-                    tx["date"] = new_date
-            if new_category:
-                tx["category"] = new_category.title()
-            if new_type:
-                tx["type"] = new_type.title()
+        # Step 1: Find matching transaction
+        cur.execute("""
+            SELECT transaction_id, description, amount, date, category, type
+            FROM transactions
+            WHERE user_id = %s AND description ILIKE %s
+            ORDER BY date DESC
+            LIMIT 1
+        """, (user_id, f"%{transaction_match}%"))
+        row = cur.fetchone()
 
-            # ✅ Always refresh 'type' from the final category, no matter what
+        if not row:
+            return f"No matching transaction found for '{transaction_match}'."
+
+        transaction_id, description, amount, date, category, type_ = row
+
+        # Step 2: Apply updates
+        if new_description:
+            description = new_description
+        if new_amount:
             try:
-                with open("data/category_type_mapping.json", "r") as f:
-                    mapping = json.load(f)
-                tx["type"] = mapping.get(tx.get("category", ""), "uncategorized")
-                print("🔁 FINAL type mapping for", tx["category"], "→", tx["type"])
-            except FileNotFoundError:
-                tx["type"] = "uncategorized"
+                amount = float(new_amount)
+            except ValueError:
+                return "Invalid amount format."
+        if new_date:
+            if new_date == "today":
+                date = datetime.now().strftime("%Y-%m-%d")
+            elif new_date == "yesterday":
+                date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                date = new_date
+        if new_category:
+            category = new_category.title()
+        if new_type:
+            type_ = new_type.title()
 
-            updated = True
-            break
+        # Reload type mapping
+        try:
+            with open("data/category_type_mapping.json", "r") as f:
+                mapping = json.load(f)
+            type_ = mapping.get(category, type_)
+        except FileNotFoundError:
+            type_ = type_ or "uncategorized"
 
-    if not updated:
-        return f"No matching transaction found for '{transaction_match}'."
+        month = date[:7]
 
-    with open("data/transactions.json", "w") as f:
-        json.dump(transactions, f, indent=2)
+        # Step 3: Update the transaction
+        cur.execute("""
+            UPDATE transactions
+            SET description = %s,
+                amount = %s,
+                date = %s,
+                category = %s,
+                type = %s,
+                month = %s
+            WHERE transaction_id = %s
+        """, (description, amount, date, category, type_, month, transaction_id))
 
-    return f"Transaction matching '{transaction_match}' updated."
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return f"✅ Transaction updated: {description} on {date} for {amount:.2f} ({category}, {type_})."
+
+    except Exception as e:
+        return f"❌ Failed to update transaction: {e}"
 
 # -----------------------------------------
 # 📥 Tool: Import and Store PDF Transactions
@@ -510,19 +627,27 @@ def update_transaction(
 @register_tool(tags=["budgeting"])
 def import_pdf_transactions(file_path: str) -> Dict:
     """
-    Parses a PDF bank statement and stores categorized transactions in the database.
-    Also saves raw dump and metadata.
+    Parses a PDF bank statement and stores categorized transactions in the RDS database.
+    Also saves raw dump locally for audit/debugging.
+    Skips duplicates based on (date, amount, description).
     """
-    # ---------------------------
-    # 🧾 1. Parse Transactions
-    # ---------------------------
+    import os
+    import re
+    import json
+    import uuid
+    from datetime import datetime
+    import pdfplumber
+    from utils.db_connection import get_db_connection
+
     transactions = []
     raw_transactions = []
+
+    # 1. Parse PDF
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
             lines = page.extract_text().splitlines()
             for line in lines:
-                match = re.match(r"^(\d{2}\.\d{2}\.\d{4}) (.+?) (-?\d+,\d{2}) €?$", line)
+                match = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+(-?\d+,\d{2})\s?\u20ac?$", line)
                 if match:
                     date_str, desc, amount_str = match.groups()
                     try:
@@ -530,109 +655,97 @@ def import_pdf_transactions(file_path: str) -> Dict:
                         iso_date = date.strftime("%Y-%m-%d")
                         month_tag = date.strftime("%Y-%m")
                         amount = float(amount_str.replace(".", "").replace(",", "."))
-                        raw_tx = {
+
+                        # Heuristic categorization
+                        desc_lower = desc.lower()
+                        if any(k in desc_lower for k in ["rewe", "edeka", "aldi", "dm", "apotheke", "rent", "drillisch"]):
+                            category, type_ = "Groceries", "Needs"
+                        elif any(k in desc_lower for k in ["netflix", "spotify", "starbucks", "eating", "uber"]):
+                            category, type_ = "Entertainment", "Wants"
+                        elif amount > 0:
+                            category, type_ = "Income", "Savings"
+                        else:
+                            category, type_ = "Other", "uncategorized"
+
+                        # Sign normalization
+                        amount = -abs(amount) if type_ in ["Needs", "Wants"] else abs(amount)
+
+                        raw_transactions.append({
                             "date": iso_date,
                             "amount": amount,
                             "description": desc.strip()
-                        }
-                        raw_transactions.append(raw_tx)
-
-                        # 🧠 Categorization
-                        description_lower = desc.lower()
-                        category = "Other"
-                        type_ = "uncategorized"
-
-                        if any(k in description_lower for k in ["rewe", "edeka", "aldi", "dm", "apotheke", "rent", "drillisch"]):
-                            category = "Groceries"
-                            type_ = "Needs"
-                        elif any(k in description_lower for k in ["netflix", "spotify", "starbucks", "eating", "uber"]):
-                            category = "Entertainment"
-                            type_ = "Wants"
-                        elif amount > 0:
-                            category = "Income"
-                            type_ = "Savings"
+                        })
 
                         transactions.append({
-                            "id": f"txn_{date.strftime('%Y%m%d%H%M%S')}_{len(transactions)}",
+                            "transaction_id": str(uuid.uuid4()),
+                            "user_id": "00000000-0000-0000-0000-000000000000",
                             "date": iso_date,
+                            "month": month_tag,
                             "amount": amount,
                             "description": desc.strip(),
                             "category": category,
                             "type": type_,
-                            "month": month_tag,
                             "source": os.path.basename(file_path)
                         })
-
                     except Exception as e:
-                        print("⚠️ Failed to parse line:", line)
+                        print(f"\u26a0\ufe0f Failed to parse line: {line} ({e})")
 
-    # ---------------------------
-    # 🧾 2. Save Raw Dump
-    # ---------------------------
+    if not transactions:
+        print("\u26a0\ufe0f No transactions found in the PDF.")
+        return {
+            "message": "No valid transactions found in the uploaded PDF. Please make sure it's a supported bank statement.",
+            "stored": 0,
+            "raw_dump": None,
+            "transactions": []
+        }
+
+    # 2. Save raw dump for audit/debugging
     raw_dir = "data/parsed_pdfs/raw"
     os.makedirs(raw_dir, exist_ok=True)
-
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
     base_name = os.path.basename(file_path).replace(".pdf", "").replace(" ", "_")
     raw_path = os.path.join(raw_dir, f"{base_name}_{ts}.json")
-
     with open(raw_path, "w") as f:
         json.dump(raw_transactions, f, indent=2)
 
-    # ---------------------------
-    # 🧠 3. Dedup & Store to DB
-    # ---------------------------
-    db_path = "data/transactions.json"
-    os.makedirs("data", exist_ok=True)
+    # 3. Store to RDS with deduplication
     try:
-        with open(db_path, "r") as f:
-            existing = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        existing = []
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    def is_duplicate(new_tx):
-        return any(
-            tx["date"] == new_tx["date"] and
-            tx["amount"] == new_tx["amount"] and
-            tx["description"] == new_tx["description"]
-            for tx in existing
-        )
+        inserted = 0
+        for tx in transactions:
+            cur.execute("""
+                SELECT COUNT(*) FROM transactions
+                WHERE user_id = %s AND date = %s AND amount = %s AND description = %s
+            """, (tx["user_id"], tx["date"], tx["amount"], tx["description"]))
+            exists = cur.fetchone()[0] > 0
+            if exists:
+                continue
 
-    new_txs = [tx for tx in transactions if not is_duplicate(tx)]
-    existing.extend(new_txs)
+            cur.execute("""
+                INSERT INTO transactions (
+                    transaction_id, user_id, date, month, amount, description, category, type, source
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                tx["transaction_id"], tx["user_id"], tx["date"], tx["month"], tx["amount"],
+                tx["description"], tx["category"], tx["type"], tx["source"]
+            ))
+            inserted += 1
 
-    with open(db_path, "w") as f:
-        json.dump(existing, f, indent=2)
+        conn.commit()
+        cur.close()
+        conn.close()
 
-    # ---------------------------
-    # 🧠 4. Save Metadata
-    # ---------------------------
-    meta_path = "data/parsed_pdfs/metadata.json"
-    os.makedirs("data/parsed_pdfs", exist_ok=True)
-    try:
-        with open(meta_path, "r") as f:
-            metadata = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        metadata = {}
+    except Exception as e:
+        print(f"\u274c Failed to insert into RDS: {e}")
+        return {"message": "Database insert failed.", "error": str(e)}
 
-    metadata[base_name] = {
-        "parsed_at": datetime.now().isoformat(),
-        "num_transactions": len(transactions),
-        "raw_file": raw_path
-    }
-
-    with open(meta_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    # ---------------------------
-    # ✅ Done
-    # ---------------------------
     return {
-    "message": f"Imported {len(transactions)} transactions from PDF.",
-    "stored": len(new_txs),
-    "duplicates_skipped": len(transactions) - len(new_txs),
-    "raw_dump": raw_path,
-    "transactions": new_txs  # ← Add this line!
+        "message": f"Imported {inserted} new transactions from PDF and inserted into RDS.",
+        "stored": inserted,
+        "raw_dump": raw_path,
+        "transactions": transactions
     }
 
 # -----------------------------------------
@@ -640,155 +753,127 @@ def import_pdf_transactions(file_path: str) -> Dict:
 # -----------------------------------------
 
 @register_tool(tags=["budgeting", "autocategorize", "auto", "clean_uncategorized", "smart_categorization"])
-def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> Dict:
+def auto_categorize_transactions(user_id: str) -> Dict:
     """
-    Auto-categorizes transactions using keyword rules, LLM fallback, and dynamic category updates.
-
-    - Processes all transactions with type 'uncategorized'.
-    - First attempts keyword-based matching using known merchant keywords.
-    - If keyword matching fails, falls back to LLM suggestion for category guessing.
-    - Prompts the user for confirmation or manual correction before updating each transaction.
-    - Dynamically saves new category-to-type mappings into category_type_mapping.json if the user defines them.
-    - Enforces correct amount signs based on assigned transaction type:
-        • Needs/Wants → Negative amounts
-        • Savings → Positive amounts
-    - Saves updated transactions and updated category mappings automatically.
-
-    This tool can be run:
-    - Before budget summarization (to ensure clean categorized data)
-    - Directly by user request to clean up uncategorized entries
+    Auto-categorizes uncategorized transactions for a given user using merged keyword rules, LLM fallback,
+    and dynamic category updates. Updates go to RDS. Category-type mapping stays in JSON.
 
     Args:
-        transactions (Optional[List[Dict]]): 
-            List of transactions to process. 
-            If None, loads transactions from the local database (transactions.json).
+        user_id (str): UUID of the user whose transactions are being categorized.
 
     Returns:
-        Dict: Summary containing update counts and status message.
+        Dict: Summary of update and skipped counts.
     """
-    import os
     import json
     from tools.budgeting_tools import llm_client
+    from utils.db_connection import get_db_connection
+    from utils.category_groups import load_merged_category_groups
 
-    db_path = "data/transactions.json"
     mapping_path = "data/category_type_mapping.json"
-
-    try:
-        with open(db_path, "r") as f:
-            transactions = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"message": "No transaction database found."}
-
     try:
         with open(mapping_path, "r") as f:
             category_map = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         category_map = {}
 
-    keyword_map = {
-        "groceries": ["rewe", "edeka", "aldi", "dm", "apotheke", "drillisch"],
-        "subscriptions": ["netflix", "spotify", "vodafone", "pyur"],
-        "commute": ["db vertrieb", "flixbus", "bahn"],
-        "debt": ["klarna", "advanzia", "loan"],
-        "health": ["fit one", "gym"],
-        "house expenses": ["wohnung", "miete", "landeshochschulkasse"]
-    }
+    # ✅ Load user + global keyword mappings
+    keyword_map = load_merged_category_groups(user_id)
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT transaction_id, date, amount, description
+            FROM transactions
+            WHERE user_id = %s AND type = 'uncategorized'
+            ORDER BY date DESC
+        """, (user_id,))
+        transactions = cur.fetchall()
+    except Exception as e:
+        return {"message": f"❌ Failed to load uncategorized transactions: {e}"}
 
     updated = []
     skipped = []
 
     for tx in transactions:
-        if tx.get("type", "").lower() == "uncategorized":
-            desc = tx.get("description", "").lower()
-            matched_category = None
+        desc = tx["description"].lower()
+        matched_category = None
 
-            # Step 1: Keyword Rule Matching
-            for category, keywords in keyword_map.items():
-                if any(k in desc for k in keywords):
-                    matched_category = category.title()
-                    break
+        # Step 1: Keyword Match
+        for category, keywords in keyword_map.items():
+            if any(k.lower() in desc for k in keywords):
+                matched_category = category.title()
+                break
 
-            # Step 2: Fallback to LLM if needed
-            if not matched_category:
-                prompt = f"""You are a financial assistant helping to categorize bank transactions.
-                                Your task:
-                                - Classify the following transaction into exactly ONE category like Groceries, Commute, Subscriptions, 
-                                  Debt, Health, Clothing, Entertainment, House Expenses, or Savings.
-                                - Respond ONLY with the category name.
-                                - No explanation. No sentences. Only the category word.
+        # Step 2: LLM Fallback
+        if not matched_category:
+            prompt = f"""You are a financial assistant helping to categorize bank transactions.
+                        Your task:
+                        - Classify the following transaction into exactly ONE category like Groceries, Commute, Subscriptions, 
+                          Debt, Health, Clothing, Entertainment, House Expenses, or Savings.
+                        - Respond ONLY with the category name.
+                        - No explanation. No sentences. Only the category word.
 
-                                Transaction details:
-                                - Description: {tx.get('description')}
-                                - Amount: {tx.get('amount')}
-                                - Date: {tx.get('date')}
+                        Transaction details:
+                        - Description: {tx.get('description')}
+                        - Amount: {tx.get('amount')}
+                        - Date: {tx.get('date')}
 
-                                Answer with ONLY the category word.
-                         """
-                try:
-                    response = llm_client.chat.completions.create(
-                        model="gpt-4-0613",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=10
-                    )
-                    matched_raw = response.choices[0].message.content.strip()
-                    if len(matched_raw.split()) == 1:
-                        matched_category = matched_raw.title()
-                    else:
-                        print(f"⚠️ LLM returned invalid category '{matched_raw}'. Defaulting to 'Others'.")
-                        matched_category = "Others"
-                except Exception as e:
-                    matched_category = "Others"
+                        Answer with ONLY the category word."""
+            try:
+                response = llm_client.chat.completions.create(
+                    model="gpt-4-0613",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=10
+                )
+                matched_raw = response.choices[0].message.content.strip()
+                matched_category = matched_raw.title() if len(matched_raw.split()) == 1 else "Others"
+            except Exception:
+                matched_category = "Others"
 
-            print(f"\n🔍 Transaction: {tx.get('description')} | {tx.get('amount')} on {tx.get('date')}")
-            print(f"💡 Suggest → Category: {matched_category}")
-            while True:
-                choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
-                if choice in ["yes", "no", "skip"]:
-                    break
-                else:
-                    print("⚠️ Please enter only 'yes', 'no', or 'skip'.")
-
-            if choice == "yes":
-                tx["category"] = matched_category
-                tx["type"] = category_map.get(matched_category, input(f"⚙️ No type mapping found. Enter type (Needs/Wants/Savings): ").strip().title())
-
-                # Enforce correct amount sign
-                if tx["type"] in ["Needs", "Wants"]:
-                    tx["amount"] = -abs(tx["amount"])
-                elif tx["type"] == "Savings":
-                    tx["amount"] = abs(tx["amount"])
-
-                # Save new category mapping dynamically if needed
-                if matched_category not in category_map:
-                    category_map[matched_category] = tx["type"]
-
-                updated.append(tx)
-
-            elif choice == "no":
-                custom_cat = input("📝 Enter custom category: ").strip().title()
-                custom_type = category_map.get(custom_cat, input(f"⚙️ No type mapping found. Enter type (Needs/Wants/Savings): ").strip().title())
-                tx["category"] = custom_cat
-                tx["type"] = custom_type
-
-                if custom_type in ["Needs", "Wants"]:
-                    tx["amount"] = -abs(tx["amount"])
-                elif custom_type == "Savings":
-                    tx["amount"] = abs(tx["amount"])
-
-                # Save new mapping
-                if custom_cat not in category_map:
-                    category_map[custom_cat] = custom_type
-
-                updated.append(tx)
-
+        print(f"\n🔍 Transaction: {tx['description']} | {tx['amount']} on {tx['date']}")
+        print(f"💡 Suggest → Category: {matched_category}")
+        while True:
+            choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
+            if choice in ["yes", "no", "skip"]:
+                break
             else:
-                skipped.append(tx)
+                print("⚠️ Please enter only 'yes', 'no', or 'skip'.")
 
-    # Save updated transactions
-    with open(db_path, "w") as f:
-        json.dump(transactions, f, indent=2)
+        if choice == "yes":
+            category = matched_category
+            if category not in category_map:
+                category_type = input(f"⚙️ Enter type for {category} (Needs/Wants/Savings): ").strip().title()
+                category_map[category] = category_type
+            else:
+                category_type = category_map[category]
 
-    # Save updated category map
+        elif choice == "no":
+            category = input("📝 Enter custom category: ").strip().title()
+            if category not in category_map:
+                category_type = input(f"⚙️ Enter type for {category} (Needs/Wants/Savings): ").strip().title()
+                category_map[category] = category_type
+            else:
+                category_type = category_map[category]
+        else:
+            skipped.append(tx)
+            continue
+
+        # Update in DB
+        try:
+            cur.execute("""
+                UPDATE transactions
+                SET category = %s, type = %s
+                WHERE transaction_id = %s
+            """, (category, category_type, tx["transaction_id"]))
+            updated.append(tx)
+        except Exception as e:
+            print(f"❌ Failed to update transaction {tx['transaction_id']}: {e}")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
     with open(mapping_path, "w") as f:
         json.dump(category_map, f, indent=2)
 
@@ -803,78 +888,25 @@ def auto_categorize_transactions(transactions: Optional[List[Dict]] = None) -> D
 # -----------------------------------------
 # File: tools/budgeting_tools.py
 
-# @register_tool(tags=["budgeting", "summarize"])
-# def summarize_category_spending(transactions: List[Dict], month: str, category: str) -> str:
-#     """
-#     Summarizes total spending for a given category and month from the transaction database.
-
-#     - Expands user-requested categories into related sub-categories using category_groups.json.
-#     - Filters transactions by matching the provided month against either transaction date or month field.
-#     - Only negative (expense) transactions are counted toward spending totals.
-#     - Ignores income (positive) transactions.
-#     - Supports summarizing across all categories if the requested category is "All".
-#     - Formats the output cleanly for user display.
-
-#     Args:
-#         transactions (List[Dict]): 
-#             List of all available transactions from the database.
-#         month (str): 
-#             Target month in YYYY-MM format (e.g., '2025-03').
-#         category (str): 
-#             User-requested category to summarize (e.g., 'Food', 'Entertainment', 'All').
-
-#     Returns:
-#         str: 
-#             A summary sentence stating the total amount spent for the requested category and month.
-#     """
-
-#     category_groups = load_category_groups()
-#     category_input = category.strip().lower()
-
-#     # Expand the category into list of possible matching categories
-#     expanded_categories = category_groups.get(category_input, [category_input])
-#     expanded_categories = [c.lower() for c in expanded_categories]
-
-#     total_spent = 0.0
-#     for tx in transactions:
-#         tx_date = tx.get("date", "")
-#         tx_month = tx.get("month", "")
-
-#         # Filter by month
-#         if not (tx_date.startswith(month) or tx_month == month):
-#             continue
-
-#         tx_category = tx.get("category", "").strip().lower()
-#         amt = tx.get("amount", 0)
-
-#         if not isinstance(amt, (int, float)) or amt >= 0:
-#             continue  # Only expenses (negative amounts)
-
-#         # Match category
-#         if category_input == "all" or tx_category in expanded_categories:
-#             total_spent += amt
-
-#     total_spent_display = abs(total_spent)
-#     pretty_category = "all categories" if category_input == "all" else category_input.title()
-
-#     return f"You spent €{total_spent_display:.2f} on {pretty_category} in {month}."
-
 from utils.transactions_store import get_all_transactions  # Make sure this exists
 from utils.category_groups import load_category_groups     # Or wherever you load category mappings
+from utils.transactions_store import get_transactions_by_month
+from utils.category_groups import load_category_groups
 
 @register_tool(tags=["budgeting", "summarize"])
-def summarize_category_spending(month: str, category: str) -> str:
+def summarize_category_spending(user_id: str, month: str, category: str) -> str:
     """
     Summarizes total spending for a given category and month using the latest transaction data.
 
     This tool:
-    - Loads transactions from disk at runtime (not from agent memory)
+    - Fetches transactions from RDS using the user_id
     - Expands the user-requested category using category_groups.json
     - Filters only negative (expense) transactions
     - Supports the 'All' category for total spending
     - Returns a human-readable summary
 
     Args:
+        user_id (str): UUID of the user.
         month (str): Target month in YYYY-MM format (e.g., '2025-03')
         category (str): User-requested category to summarize (e.g., 'Groceries', 'All')
 
@@ -882,178 +914,64 @@ def summarize_category_spending(month: str, category: str) -> str:
         str: Spending summary
     """
 
-    print(f"🔍 Filtering for month = {month}, category = {category.lower()}")
+    print(f"🔍 Filtering for month = {month}, category = {category.lower()} for user {user_id}")
 
-    transactions = get_all_transactions()
-    print(f"📂 Reading transactions from memory... {len(transactions)} total records")
+    transactions = get_transactions_by_month(user_id, month)
+    print(f"📂 Retrieved {len(transactions)} transactions from RDS for user {user_id}")
 
-    category_groups = load_category_groups()
+    category_groups = load_merged_category_groups()
     category_input = category.strip().lower()
     expanded_categories = category_groups.get(category_input, [category_input])
     expanded_categories = [c.lower() for c in expanded_categories]
 
     matched = []
-    for tx in transactions:
+    for tx in transactions: 
         if not isinstance(tx.get("amount"), (int, float)) or tx["amount"] >= 0:
             continue  # Skip income
-        tx_month = tx.get("month", "") or tx.get("date", "")[:7]
         tx_category = tx.get("category", "").strip().lower()
-        if tx_month != month:
-            continue
         if category_input == "all" or tx_category in expanded_categories:
             matched.append(tx)
 
     total_spent = sum(abs(tx["amount"]) for tx in matched)
     pretty_category = "all categories" if category_input == "all" else category_input.title()
     print(f"✅ Matched {len(matched)} transactions totaling €{total_spent:.2f}")
-    
-    print(f"🔍 Filtering for month = {month}, category = {category.lower()}")
-    print(f"📂 Reading transactions... {len(transactions)} total records")
 
     return f"You spent €{total_spent:.2f} on {pretty_category} in {month}."
 
 
 # -----------------------------------------
-# 📊 Tool: Query Category Spending
+# 📊 Tool: Query Category Spending (Natural Language)
 # -----------------------------------------
 
-# @register_tool(tags=["budgeting", "query", "spending", "category"])
-# def query_category_spending(nl_query: str) -> Dict:
-#     """
-#     Tool Name: query_category_spending
+@register_tool(tags=["budgeting", "query", "spending", "category"])
+def query_category_spending(user_id: str, query: str) -> Dict:
+    """
+    Tool Name: query_category_spending
 
-#     Description:
-#         Routes a natural-language query like "groceries in March 2025"
-#         to the summarizer.
+    Description:
+        Parses a natural-language query like "groceries in March 2025"
+        and routes it to the summarizer.
 
-#     Args:
-#         category (str): Natural phrase from user, e.g., "groceries in March"
+    Args:
+        user_id (str): UUID of the user.
+        query (str): Natural-language phrase, e.g., "groceries in March"
 
-#     Returns:
-#         Dictionary with total spending, matched transactions, and summary message.
-#     """
-#     # 1) Parse category + month
-#     label, month_str = extract_month_from_phrase(nl_query)
+    Returns:
+        Dict: Spending summary details.
+    """
+    label, month_str = extract_month_from_phrase(query)
 
-#     # 2) Detect generic spending queries
-#     if any(tok in label.lower() for tok in ("expense", "spending", "total")):
-#         label = "All"
+    # Default to 'All' if generic words are used
+    if any(tok in label.lower() for tok in ("expense", "spending", "total")):
+        label = "All"
 
-#     # 3) Delegate
-#     return summarize_category_spending(label, month_str)
-
-
-# def query_category_spending(category: str, month: str = None) -> dict:
-#     """
-#     Tool Name: query_category_spending
-#     Description:
-#         Routes natural-language category queries like "groceries in March"
-#         or "expenses last month" to the appropriate summarizer.
-
-#     Args:
-#         nl (str): Natural-language query, e.g. "eating out in March 2025"
-
-#     Returns:
-#         Dict with total spending, matched transactions, and summary message.
-#     """
-#     nl = category.strip().lower()
-
-#     # 1) Extract month name + optional year
-#     month_regex = re.compile(
-#         r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", 
-#         re.IGNORECASE
-#     )
-#     m = month_regex.search(nl)
-#     if m:
-#         month_name = m.group(1).title()
-#         month_num = datetime.strptime(month_name, "%B").month
-#         year_match = re.search(r"\b(20\d{2})\b", nl)
-#         year = int(year_match.group(1)) if year_match else datetime.now().year
-#         month_str = f"{year}-{month_num:02d}"
-#         # Remove the “in March” (or just “March”) from the phrase:
-#         nl_cleaned = re.sub(rf"\b(in\s+)?{month_name.lower()}\b", "", nl).strip()
-#     elif "last month" in nl:
-#         today = datetime.today()
-#         prev_month = today.month - 1 or 12
-#         prev_year = today.year if today.month > 1 else today.year - 1
-#         month_str = f"{prev_year}-{prev_month:02d}"
-#         nl_cleaned = nl.replace("last month", "").strip()
-#     else:
-#         # default to this month
-#         month_str = datetime.now().strftime("%Y-%m")
-#         nl_cleaned = nl
-
-#     # 2) If they asked “expenses” in general, use “All”
-#     if any(tok in nl_cleaned for tok in ("expense", "spending", "total")):
-#         cat = "All"
-#     else:
-#         # Title-case the remainder to match your categories
-#         cat = nl_cleaned.title()
-
-#     # 3) Finally call your summarizer
-#     return summarize_category_spending(cat, month_str)
-
-# @register_tool(tags=["budgeting", "query", "spending", "category"])
-# def query_category_spending(category: str) -> dict:
-#     """
-#     Tool Name: query_category_spending
-#     Description:
-#         Routes natural-language category queries like "groceries in March" or "expenses last month"
-#         to the appropriate budget summarization logic.
-
-#     Args:
-#         category (str): Natural phrase from user, e.g., "groceries in March"
-
-#     Returns:
-#         Dictionary with total spending, matched transactions, and summary message.
-#     """
-#     import re
-#     from datetime import datetime
-#     from tools.budgeting_tools import summarize_category_spending
-
-#     category_lower = category.strip().lower()
-#     month_match = re.search(
-#         r"(january|february|march|april|may|june|july|august|september|october|november|december)",
-#         category_lower,
-#         re.IGNORECASE,
-#     )
-
-#     # Step 1: Extract Month in YYYY-MM format if possible
-#     if month_match:
-#         month_name = month_match.group(0).title()
-#         month_number = datetime.strptime(month_name, "%B").month
-#         year_match = re.search(r"\b(20\d{2})\b", category_lower)
-#         year = int(year_match.group(0)) if year_match else datetime.now().year
-#         month_str = f"{year}-{month_number:02d}"
-#         cleaned_category = (
-#             category_lower.replace(f"in {month_name.lower()}", "")
-#             .replace(month_name.lower(), "")
-#             .strip()
-#         )
-#     elif "last month" in category_lower:
-#         today = datetime.today()
-#         month = today.month - 1 or 12
-#         year = today.year if today.month > 1 else today.year - 1
-#         month_str = f"{year}-{month:02d}"
-#         cleaned_category = category_lower.replace("last month", "").strip()
-#     elif "this month" in category_lower:
-#         month_str = datetime.now().strftime("%Y-%m")
-#         cleaned_category = category_lower.replace("this month", "").strip()
-#     else:
-#         month_str = datetime.now().strftime("%Y-%m")
-#         cleaned_category = category_lower
-
-#     # Step 2: Check for general "spending" or "expenses" phrasing
-#     general_terms = {"expenses", "spending", "total", "total spending"}
-#     if any(term in cleaned_category for term in general_terms):
-#         return summarize_category_spending("All", month_str)
-
-#     # Step 3: Normalize category to title case
-#     cleaned_category = (
-#         cleaned_category.replace("in", "").replace("on", "").strip().title()
-#     )
-
-#     return summarize_category_spending(cleaned_category, month_str)
+    summary_text = summarize_category_spending(user_id=user_id, month=month_str, category=label)
+    return {
+        "query": query,
+        "month": month_str,
+        "category": label,
+        "summary": summary_text
+    }
 
 # -----------------------------------------
 # 📈 Tool Terminate: Agent Terminate

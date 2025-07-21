@@ -2,34 +2,69 @@ import json
 import os
 from datetime import datetime
 
-TRANSACTION_FILE = os.path.join("data", "transactions.json")
+# Add imports for database access
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+from utils.db_connection import get_db_connection
 
-def get_all_transactions():
+load_dotenv()
+
+def get_all_transactions(user_id: str):
     """
-    Loads all transactions from the main JSON database file.
+    Loads all transactions for a specific user from the RDS PostgreSQL database.
+
+    Args:
+        user_id (str): UUID of the user whose transactions to fetch.
 
     Returns:
-        List[Dict]: Parsed transactions or empty list if file not found.
+        List[Dict]: Parsed transactions or empty list on error.
     """
     try:
-        print(f"📂 Reading transactions from: {os.path.abspath(TRANSACTION_FILE)}")
-        with open(TRANSACTION_FILE, "r") as f:
-            transactions = json.load(f)
-        print(f"📊 {len(transactions)} transactions loaded.")
+        connection = psycopg2.connect(
+            host=os.getenv("PG_HOST"),
+            database=os.getenv("PG_DATABASE"),
+            user=os.getenv("PG_USER"),
+            password=os.getenv("PG_PASSWORD"),
+            port=os.getenv("PG_PORT"),
+        )
+        cursor = connection.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM transactions WHERE user_id = %s ORDER BY date DESC",
+            (user_id,)
+        )
+        transactions = cursor.fetchall()
+        print(f"📊 {len(transactions)} transactions loaded for user {user_id} from RDS.")
+        cursor.close()
+        connection.close()
         return transactions
     except Exception as e:
-        print(f"❌ Failed to load transactions: {e}")
+        print(f"❌ Failed to load transactions from RDS for user {user_id}: {e}")
         return []
-    
+
 def derive_month_from_date(date_str):
     try:
         return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
     except Exception:
         return None
-    
-def get_transactions_by_month(month: str):
+
+def get_transactions_by_month(user_id: str, month: str):
     """
-    Retrieves transactions for a specific month.
+    Retrieves transactions for a specific user and month directly from the database.
     """
-    transactions = get_all_transactions()
-    return [tx for tx in transactions if derive_month_from_date(tx["date"]) == month]
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT * FROM transactions
+            WHERE user_id = %s AND month = %s
+            ORDER BY date DESC
+        """, (user_id, month))
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        print(f"📊 {len(results)} transactions for user {user_id} in {month}")
+        return results
+    except Exception as e:
+        print(f"❌ Failed to fetch monthly transactions from RDS: {e}")
+        return []
