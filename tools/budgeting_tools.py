@@ -25,6 +25,7 @@ from utils.transactions_store import get_all_transactions  # replaces extract_tr
 from utils.category_groups import load_merged_category_groups     # Or wherever you load category mappings
 from utils.transactions_store import get_transactions_by_month
 from tools.budgeting_tools import auto_categorize_transactions
+from utils.expense_income_keywords import load_expense_income_keywords
 
 # Initializes the OpenAI client using the API key from environment variables.
 load_dotenv()
@@ -188,20 +189,42 @@ def parse_bank_pdf(user_id: str, file_path: str) -> Dict:
                             break
                     category = matched_group if matched_group else "Uncategorized"
 
-                    # Step 2: Get type from RDS category_type_mapping
+                    # Step 2: Get type from RDS category_type_mapping or fallback
                     conn = get_db_connection()
                     cur = conn.cursor()
+
                     cur.execute("SELECT budget_type FROM category_type_mapping WHERE category = %s", (category,))
                     row = cur.fetchone()
                     type_ = row[0] if row else "Uncategorized"
+
+                    # Step 3: Fallback to expense/income keyword table if still Uncategorized
+                    if type_ == "Uncategorized":
+                        cur.execute("""
+                            SELECT category FROM expense_income_keywords
+                            WHERE LOWER(%s) LIKE '%%' || LOWER(keyword) || '%%'
+                            LIMIT 1
+                        """, (desc_lower,))
+                        row = cur.fetchone()
+                        if row:
+                            fallback_category = row[0]
+                            if fallback_category == "expense":
+                                type_ = "Needs"
+                                amount = -abs(amount)
+                            elif fallback_category == "income":
+                                type_ = "Savings"
+                                amount = abs(amount)
+                        else:
+                            amount = -abs(amount)  # default to expense sign
+
+                    else:
+                        # Sign normalization based on resolved type
+                        if type_ in ["Needs", "Wants"]:
+                            amount = -abs(amount)
+                        elif type_ == "Savings":
+                            amount = abs(amount)
+
                     cur.close()
                     conn.close()
-
-                    # Step 3: Normalize sign
-                    if type_ in ["Needs", "Wants"]:
-                        amount = -abs(amount)
-                    elif type_ == "Savings":
-                        amount = abs(amount)
 
                     transactions.append({
                         "transaction_id": str(uuid.uuid4()),
@@ -294,8 +317,9 @@ def record_income_source(user_id: str, source_name: str, amount: float) -> str:
 @register_tool(tags=["budgeting"])
 def record_transaction(date: str, amount: float, description: str, category: str = "uncategorized") -> Dict:
     """
-    Records a new transaction with correct sign normalization based on category type.
-    Inserts into RDS using dynamic category → type mapping from category_type_mapping table.
+    Records a new transaction with correct sign normalization.
+    Infers type based on either keyword match or category_type_mapping table.
+    Inserts transaction into RDS.
     """
     from utils.db_connection import get_db_connection
 
@@ -311,40 +335,47 @@ def record_transaction(date: str, amount: float, description: str, category: str
         except ValueError:
             raise ValueError(f"Invalid date format: '{date}'.")
 
-    # Normalize category input
+    description_clean = description.strip()
+    desc_lower = description_clean.lower()
     category_normalized = category.strip().title()
     type_ = "Uncategorized"
+    user_id = "00000000-0000-0000-0000-000000000000"  # Fallback user
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Check type from DB
-        cur.execute("""
-            SELECT budget_type FROM category_type_mapping
-            WHERE category = %s
-        """, (category_normalized,))
+        # Step 1: Check if description matches any known expense/income keyword
+        cur.execute("SELECT category FROM expense_income_keywords")
+        keywords = [row[0].lower() for row in cur.fetchall()]
+        if any(k in desc_lower for k in keywords):
+            if any(k in desc_lower for k in keywords if k in ["salary", "refund", "deposit", "income", "reimbursement", "cashback"]):
+                type_ = "Savings"
+                category_normalized = "Income"
+            else:
+                type_ = "Needs"
+                category_normalized = "General Expense"
+
+        # Step 2: Try lookup from category_type_mapping table
+        cur.execute("SELECT budget_type FROM category_type_mapping WHERE category = %s", (category_normalized,))
         row = cur.fetchone()
         if row:
             type_ = row[0]
         else:
-            print(f"⚠️ Category '{category_normalized}' not found in category_type_mapping table.")
+            print(f"⚠️ Category '{category_normalized}' not found in category_type_mapping.")
             decision = input("🛠️ Would you like to define this category now? [yes/no]: ").strip().lower()
             if decision == "yes":
                 type_input = input("🔵 Enter type for this category (Needs/Wants/Savings): ").strip().title()
                 if type_input in ["Needs", "Wants", "Savings"]:
                     type_ = type_input
-                    cur.execute("""
-                        INSERT INTO category_type_mapping (category, budget_type)
-                        VALUES (%s, %s)
-                    """, (category_normalized, type_))
-                    print(f"✅ Category '{category_normalized}' mapped to '{type_}' and saved.")
+                    cur.execute("INSERT INTO category_type_mapping (category, budget_type) VALUES (%s, %s)", (category_normalized, type_))
+                    print(f"✅ Saved mapping: {category_normalized} → {type_}")
                 else:
-                    print("❌ Invalid input. Proceeding as 'Uncategorized'.")
+                    print("❌ Invalid input. Defaulting to 'Uncategorized'.")
             else:
                 print("⚠️ Proceeding as 'Uncategorized'.")
 
-        # Normalize amount based on type
+        # Step 3: Normalize amount sign
         if type_ in ["Needs", "Wants"]:
             amount = -abs(amount)
         elif type_ == "Savings":
@@ -352,15 +383,13 @@ def record_transaction(date: str, amount: float, description: str, category: str
         else:
             amount = -abs(amount)
 
-        user_id = "00000000-0000-0000-0000-000000000000"  # Default fallback
-
-        # Insert transaction
+        # Step 4: Insert into DB
         cur.execute("""
             INSERT INTO transactions (
                 transaction_id, user_id, date, amount, description, category, type, month
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            str(uuid.uuid4()), user_id, date, amount, description.strip(),
+            str(uuid.uuid4()), user_id, date, amount, description_clean,
             category_normalized, type_, date[:7]
         ))
 
@@ -369,11 +398,11 @@ def record_transaction(date: str, amount: float, description: str, category: str
         conn.close()
 
         return {
-            "message": f"Transaction recorded under {category_normalized} ({type_}).",
+            "message": f"✅ Transaction recorded under {category_normalized} ({type_}).",
             "transaction": {
                 "date": date,
                 "amount": amount,
-                "description": description.strip(),
+                "description": description_clean,
                 "category": category_normalized,
                 "type": type_,
                 "month": date[:7]
