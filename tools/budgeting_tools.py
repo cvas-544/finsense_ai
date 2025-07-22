@@ -24,7 +24,6 @@ from utils.db_connection import get_db_connection
 from utils.transactions_store import get_all_transactions  # replaces extract_transactions_from_db - Make sure this exists
 from utils.category_groups import load_merged_category_groups     # Or wherever you load category mappings
 from utils.transactions_store import get_transactions_by_month
-from tools.budgeting_tools import auto_categorize_transactions
 from utils.expense_income_keywords import load_expense_income_keywords
 
 # Initializes the OpenAI client using the API key from environment variables.
@@ -757,7 +756,7 @@ def import_pdf_transactions(file_path: str) -> Dict:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT category, type FROM category_type_mapping")
+        cur.execute("SELECT category, budget_type FROM category_type_mapping")
         category_type_map = {cat: t for cat, t in cur.fetchall()}
         cur.close()
         conn.close()
