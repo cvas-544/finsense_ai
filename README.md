@@ -4,51 +4,49 @@ The **BudgetingAgent** is the first modular agent in the FinSense AI project. It
 
 ---
 
-Built with:
-
-- ✅ GAME Framework
-- ✅ FastAPI + Uvicorn server
-- ✅ Native Notion webhook integration
-- ✅ LLM-powered budget parser
-- ✅ PDF bank statement import
-- ✅ 50/30/20 budgeting logic
-- ✅ Notion sync and real-time webhooks
-
----
-
-## 🎯 Core Purpose
-Help you:
-- Track daily and monthly spending
-- Stay within a personalized budget using the 50/30/20 rule
-- Receive alerts, summaries, and planning suggestions
-- Ask questions like "How much did I spend on Food in March?"
+✅ Built With:
+	•	GAME Framework (Goal → Actions → Memory → Env)
+	•	PostgreSQL (via AWS RDS)
+	•	Python 3.11+
+	•	OpenAI API for smart categorization
+	•	pdfplumber for bank statement parsing
+	•	Telegram Bot for interaction
+	•	EC2-hosted CLI/API runtime (optional)
 
 ---
 
-## ✅ Supported Use Cases
+🎯 What Can It Do?
+	•	Parse bank statement PDFs into structured transactions
+	•	Categorize and label spending using keywords + LLM fallback
+	•	Automatically assign Needs/Wants/Savings type
+	•	Enforce a 50/30/20 budget rule based on income
+	•	Summarize expenses monthly or by category
+	•	Answer natural language questions like:
+	•	“How much did I spend on groceries in April?”
+	•	“What’s my remaining Wants budget for June?”
 
-### 🔹 Basic Functions (MVP)
-1. **Parse PDF bank statements** to build a transaction history  
-2. **Read expenses from Notion** (manual entries or synced data)  
-3. **Apply 50/30/20 budget rule** against monthly income  
-4. **Alert if over budget** in Needs, Wants, or Savings  
-5. **Summarize remaining budget** by category  
-6. **Natural language summaries** (e.g., “Give me my March spending”)
+---
 
-### 🔹 Advanced Functions (Phase 2)
-7. **Generate a standardized monthly report** with:
-   - Category breakdown (pie chart or table)
-   - Over/under budget indicators
-   - Total vs actual vs planned spending
+✅ Supported Features
 
-8. **Compare spending with past months** to show trends
-   - “You're spending 20% more on subscriptions than last month”
+📄 PDF Import
+	•	Extracts date, description, and amount from PDF lines
+	•	Auto-categorizes using user-defined + global keywords
+	•	Applies income/expense sign logic
+	•	Saves all transactions to AWS RDS (PostgreSQL)
+	•	Skips duplicates based on (date, description, amount)
 
-9. **Handle user affirmations / short-term goals**
-   - “I want to buy €100 sneakers this week” → Suggest where to cut costs
+🤖 Auto Categorization
+	•	Runs keyword match across global/user keyword tables
+	•	Falls back to LLM if no match found
+	•	Prompts user to approve or adjust the categorization
+	•	Updates transaction type (Needs/Wants/Savings) accordingly
 
-10. **Guide user planning with tips and trade-offs**
-   - Show impact of optional purchases, offer suggestions to rebalance budget
+📊 Budget Summarization
+	•	Uses income and preferred ratio from user_profile table
+	•	Applies 50/30/20 rule to evaluate spending limits
+	•	Compares actual spending to budgeted goals
+	•	Supports summaries by category or overall budget
 
 ---
 
@@ -61,30 +59,17 @@ Help you:
 | Memory | Stores transaction history, summaries, and agent context |
 | Environment | Executes tools safely and tracks context |
 | Agent2Agent | Future-ready to communicate with other agents like InvestmentAgent |
-
----
-
-## 🔧 Data Sources
-
-- 📄 PDF Statements (Parsed & Categorized) → Imported using `pdfplumber`
-- 📟 Notion Database → Synced and merged
-- 🗨 User Questions → Routed through LLM parser or CLI input
-
----
-
-## 🔄 Outputs
-- CLI or Notion output
-- 🧠 Budget summaries (daily, monthly)
-- 🗂 Category breakdowns
-- 💬 Agent chat-style messages: “You're 15% over budget for Wants”
+| RDS Backend | All data stored in PostgreSQL on AWS RDS |
+| Telegram UI | Bot interface for real-time queries and commands |
+| EC2 Hosting | Deploy the CLI and tools API on AWS EC2 instance for persistent access |
 
 ---
 
 ## 🚫 Not In Scope (for now)
 - Real-time bank syncing (uses manual PDFs)
-- Multi-user support
 - Currency conversion
-- Machine learning classification (uses rules + LLM fallback)
+- Investment tools (coming later)
+- Visual dashboards (basic summaries only for now)
 
 ---
 
@@ -96,144 +81,11 @@ This agent is designed to grow over time by:
 
 ---
 
-## ⚙️ Setup Instructions
-
-### 1. Clone the repo and create environment
-
-```bash
-git clone https://github.com/your-username/finsense.git
-cd finsense
-conda create -n finsense python=3.11
-conda activate finsense
-```
-
-### 2. Install requirements
-
-```bash
-pip install -r requirements.txt
-```
-
-Or use the safer fallback installer:
-
-```bash
-python install_requirements_safely.py
-```
-
-### 3. Start FastAPI webhook server
-
-```bash
-uvicorn server.main:app --reload --port 8000
-```
-
-### 4. Expose with ngrok
-
-```bash
-ngrok http 8000
-```
-
-Paste the resulting URL into Notion Developer Dashboard as your webhook endpoint.
-
----
-
-## 🗂 FinSense Notion Dashboard Template
-
-Looking for a plug-and-play workspace?
-
-🌟 Use the official FinSense Notion Template to:
-
-- Upload bank PDFs
-- Manually log transactions
-- View synced budgets and summaries
-- Chat with your FinSense agent (coming soon)
-
-📌 Access it here:  
-🔗 [FinSense Finance Dashboard (Notion Template)](https://mellow-writer-2ec.notion.site/FinSense-Finance-Dashboard-1dd8efee976f801fbaf3dc111706ca6e)
-
-Make a copy into your workspace and connect your FinSense integration.
-
----
-
-## 🦡 Native Notion Webhooks
-
-You can register your webhook URL at [notion.so/my-integrations](https://www.notion.so/my-integrations) to receive events like:
-
-- `page.created`
-- `page.updated`
-- `comment.created`
-
-FinSense reacts to these events automatically:
-- Parses new transactions
-- Replies to user queries
-- Logs budget changes
-
----
-
-## 🧪 Testing Webhooks
-
-Use curl or Postman:
-
-```bash
-curl -X POST https://your-ngrok-url.ngrok-free.app/notion-webhook/ \
-  -H "Content-Type: application/json" \
-  -d '{"type": "page.created", "data": { ... }}'
-```
-
-You’ll see live logs in the FastAPI server console.
-
----
-
-## 🔐 Webhook Signature (Optional)
-
-Enable HMAC verification for security.
-
-1. Set in your Notion webhook settings
-2. Add it to your `.env`:
-
-```env
-NOTION_WEBHOOK_SECRET=your-secret-here
-```
-
----
-
-## 📁 Project Structure
-
-```
-finsense/
-├── cli/                    ← Command-line interaction
-├── server/                 ← FastAPI app and webhook handlers
-│   └── notion_webhook.py
-├── tools/                  ← Budgeting tools, summarizers
-├── utils/                  ← Notion sync, helper functions
-├── data/                   ← Persistent storage (transactions, profile)
-├── requirements.txt
-```
-
----
-
-## 🧠 FinSense Chat (Coming Soon)
-
-Notion-based conversational chat UI:
-
-- User adds question in a Notion database
-- FinSense agent responds in the same table
-- Acts like a chat between you and your budget coach
-
----
-
-## 📈 Future Roadmap
-
-- Pie chart exports for monthly summaries
-- InvestmentAgent & GoalPlannerAgent
-- Multi-device support
-- Richer report generation in Notion
-
----
-
 ## 👨‍💼 Author
 
 Built by Vasu Chukka  
 📬 Email: vasu.chukka@outlook.com  
 💻 LinkedIn: [VasuChukka](https://www.linkedin.com/in/vasu-chukka-1a3569116/)
 
-Stay focused. Stay frugal. Let your agent do the math. 💸
+Let your agent handle your budget while you live your life. 💸
 
