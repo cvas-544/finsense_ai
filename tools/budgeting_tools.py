@@ -314,7 +314,7 @@ def record_income_source(user_id: str, source_name: str, amount: float) -> str:
 # ----------------------------
 
 @register_tool(tags=["budgeting"])
-def record_transaction(date: str, amount: float, description: str, category: str = "uncategorized") -> Dict:
+def record_transaction(date: str, amount: float, description: str, category: str = "Uncategorized") -> Dict:
     """
     Records a new transaction with correct sign normalization.
     Infers type based on either keyword match or category_type_mapping table.
@@ -696,7 +696,7 @@ def update_transaction(
 
         # Reload type mapping from RDS if category changed
         if new_category:
-            cur.execute("SELECT type FROM category_type_mapping WHERE category = %s", (category,))
+            cur.execute("SELECT budget_type FROM category_type_mapping WHERE category = %s", (category,))
             result = cur.fetchone()
             if result:
                 type_ = result[0]
@@ -789,13 +789,16 @@ def import_pdf_transactions(file_path: str) -> Dict:
                                 break
 
                         # Match type from RDS category_type_mapping
-                        type_ = category_type_map.get(matched_category, "uncategorized")
+                        type_ = category_type_map.get(matched_category, "Uncategorized")
 
                         # Sign normalization
-                        if type_ in ["Needs", "Wants"]:
+                        if type_ == "Needs" or type_ == "Wants":
                             amount = -abs(amount)
                         elif type_ == "Savings":
                             amount = abs(amount)
+                        else:
+                            type_ = "Uncategorized" # Default to negative unless explicitly Savings
+                            amount = -abs(amount)
 
                         raw_transactions.append({
                             "date": iso_date,
@@ -889,9 +892,7 @@ def auto_categorize_transactions(user_id: str) -> Dict:
     from utils.db_connection import get_db_connection
     from utils.category_groups import load_merged_category_groups
 
-    # Load merged category keyword map
     keyword_map = load_merged_category_groups(user_id)
-
     updated = []
     skipped = []
 
@@ -899,44 +900,44 @@ def auto_categorize_transactions(user_id: str) -> Dict:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Load all uncategorized transactions
+        # Load uncategorized transactions
         cur.execute("""
             SELECT transaction_id, date, amount, description
             FROM transactions
-            WHERE user_id = %s AND type = 'uncategorized'
+            WHERE user_id = %s AND type = 'Uncategorized'
             ORDER BY date DESC
         """, (user_id,))
         transactions = cur.fetchall()
 
         # Load category → type mapping
-        cur.execute("SELECT category, type FROM category_type_mapping")
+        cur.execute("SELECT category, budget_type FROM category_type_mapping")
         category_type_map = {cat: typ for cat, typ in cur.fetchall()}
 
-        for tx in transactions:
-            desc = tx["description"].lower()
+        for tx_id, date, amount, desc in transactions:
+            desc_lower = desc.lower()
             matched_category = None
 
-            # Step 1: Keyword Match
+            # 1. Try keyword match
             for group, keywords in keyword_map.items():
-                if any(k.lower() in desc for k in keywords):
+                if any(k.lower() in desc_lower for k in keywords):
                     matched_category = group.title()
                     break
 
-            # Step 2: LLM fallback
+            # 2. Fallback to LLM if no match
             if not matched_category:
                 prompt = f"""You are a financial assistant helping to categorize bank transactions.
-                            Your task:
-                            - Classify the following transaction into exactly ONE category like Groceries, Commute, Subscriptions, 
-                              Debt, Health, Clothing, Entertainment, House Expenses, or Savings.
-                            - Respond ONLY with the category name.
-                            - No explanation. No sentences. Only the category word.
+                Your task:
+                - Classify the following transaction into exactly ONE category like Groceries, Commute, Subscriptions, 
+                  Debt, Health, Clothing, Entertainment, House Expenses, or Savings.
+                - Respond ONLY with the category name.
+                - No explanation. No sentences. Only the category word.
 
-                            Transaction details:
-                            - Description: {tx.get('description')}
-                            - Amount: {tx.get('amount')}
-                            - Date: {tx.get('date')}
-                            
-                            Answer with ONLY the category word."""
+                Transaction details:
+                - Description: {desc}
+                - Amount: {amount}
+                - Date: {date}
+
+                Answer with ONLY the category word."""
                 try:
                     response = llm_client.chat.completions.create(
                         model="gpt-4-0613",
@@ -948,7 +949,7 @@ def auto_categorize_transactions(user_id: str) -> Dict:
                 except Exception:
                     matched_category = "Others"
 
-            print(f"\n🔍 Transaction: {tx['description']} | {tx['amount']} on {tx['date']}")
+            print(f"\n🔍 Transaction: {desc} | {amount} on {date}")
             print(f"💡 Suggest → Category: {matched_category}")
             while True:
                 choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
@@ -964,12 +965,12 @@ def auto_categorize_transactions(user_id: str) -> Dict:
                     if category_type in ["Needs", "Wants", "Savings"]:
                         category_type_map[category] = category_type
                         cur.execute("""
-                            INSERT INTO category_type_mapping (category, type)
+                            INSERT INTO category_type_mapping (category, budget_type)
                             VALUES (%s, %s)
                             ON CONFLICT (category) DO NOTHING
                         """, (category, category_type))
                     else:
-                        category_type = "uncategorized"
+                        category_type = "Uncategorized"
                 else:
                     category_type = category_type_map[category]
 
@@ -980,28 +981,38 @@ def auto_categorize_transactions(user_id: str) -> Dict:
                     if category_type in ["Needs", "Wants", "Savings"]:
                         category_type_map[category] = category_type
                         cur.execute("""
-                            INSERT INTO category_type_mapping (category, type)
+                            INSERT INTO category_type_mapping (category, budget_type)
                             VALUES (%s, %s)
                             ON CONFLICT (category) DO NOTHING
                         """, (category, category_type))
                     else:
-                        category_type = "uncategorized"
+                        category_type = "Uncategorized"
                 else:
                     category_type = category_type_map[category]
             else:
-                skipped.append(tx)
+                skipped.append({
+                    "transaction_id": tx_id,
+                    "description": desc,
+                    "amount": amount,
+                    "date": date
+                })
                 continue
 
-            # Final update into DB
+            # 3. Update DB
             try:
                 cur.execute("""
                     UPDATE transactions
                     SET category = %s, type = %s
                     WHERE transaction_id = %s
-                """, (category, category_type, tx["transaction_id"]))
-                updated.append(tx)
+                """, (category, category_type, tx_id))
+                updated.append({
+                    "transaction_id": tx_id,
+                    "description": desc,
+                    "amount": amount,
+                    "date": date
+                })
             except Exception as e:
-                print(f"❌ Failed to update transaction {tx['transaction_id']}: {e}")
+                print(f"❌ Failed to update transaction {tx_id}: {e}")
 
         conn.commit()
         cur.close()
