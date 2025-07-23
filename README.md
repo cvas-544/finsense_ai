@@ -5,48 +5,48 @@ The **BudgetingAgent** is the first modular agent in the FinSense AI project. It
 ---
 
 ✅ Built With:
-	•	GAME Framework (Goal → Actions → Memory → Env)
-	•	PostgreSQL (via AWS RDS)
-	•	Python 3.11+
-	•	OpenAI API for smart categorization
-	•	pdfplumber for bank statement parsing
-	•	Telegram Bot for interaction
-	•	EC2-hosted CLI/API runtime (optional)
+	- GAME Framework (Goal → Actions → Memory → Env)
+	- PostgreSQL (via AWS RDS)
+	- Python 3.11+
+	- OpenAI API for smart categorization
+	- pdfplumber for bank statement parsing
+	- Telegram Bot for interaction
+	- EC2-hosted CLI/API runtime (optional)
 
 ---
 
 🎯 What Can It Do?
-	•	Parse bank statement PDFs into structured transactions
-	•	Categorize and label spending using keywords + LLM fallback
-	•	Automatically assign Needs/Wants/Savings type
-	•	Enforce a 50/30/20 budget rule based on income
-	•	Summarize expenses monthly or by category
-	•	Answer natural language questions like:
-	•	“How much did I spend on groceries in April?”
-	•	“What’s my remaining Wants budget for June?”
+	- Parse bank statement PDFs into structured transactions
+	- Categorize and label spending using keywords + LLM fallback
+	- Automatically assign Needs/Wants/Savings type
+	- Enforce a 50/30/20 budget rule based on income
+	- Summarize expenses monthly or by category
+	- Answer natural language questions like:
+	- “How much did I spend on groceries in April?”
+	- “What’s my remaining Wants budget for June?”
 
 ---
 
 ✅ Supported Features
 
 📄 PDF Import
-	•	Extracts date, description, and amount from PDF lines
-	•	Auto-categorizes using user-defined + global keywords
-	•	Applies income/expense sign logic
-	•	Saves all transactions to AWS RDS (PostgreSQL)
-	•	Skips duplicates based on (date, description, amount)
+	- Extracts date, description, and amount from PDF lines
+	- Auto-categorizes using user-defined + global keywords
+	- Applies income/expense sign logic
+	- Saves all transactions to AWS RDS (PostgreSQL)
+	- Skips duplicates based on (date, description, amount)
 
 🤖 Auto Categorization
-	•	Runs keyword match across global/user keyword tables
-	•	Falls back to LLM if no match found
-	•	Prompts user to approve or adjust the categorization
-	•	Updates transaction type (Needs/Wants/Savings) accordingly
+	- Runs keyword match across global/user keyword tables
+	- Falls back to LLM if no match found
+	- Prompts user to approve or adjust the categorization
+	- Updates transaction type (Needs/Wants/Savings) accordingly
 
 📊 Budget Summarization
-	•	Uses income and preferred ratio from user_profile table
-	•	Applies 50/30/20 rule to evaluate spending limits
-	•	Compares actual spending to budgeted goals
-	•	Supports summaries by category or overall budget
+	- Uses income and preferred ratio from user_profile table
+	- Applies 50/30/20 rule to evaluate spending limits
+	- Compares actual spending to budgeted goals
+	- Supports summaries by category or overall budget
 
 ---
 
