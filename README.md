@@ -4,7 +4,7 @@ The **BudgetingAgent** is the first modular agent in the FinSense AI project. It
 
 ---
 
-✅ Built With:
+## ✅ Built With:
 	- GAME Framework (Goal → Actions → Memory → Env)
 	- PostgreSQL (via AWS RDS)
 	- Python 3.11+
@@ -15,7 +15,7 @@ The **BudgetingAgent** is the first modular agent in the FinSense AI project. It
 
 ---
 
-🎯 What Can It Do?
+## 🎯 What Can It Do?
 	- Parse bank statement PDFs into structured transactions
 	- Categorize and label spending using keywords + LLM fallback
 	- Automatically assign Needs/Wants/Savings type
@@ -27,22 +27,22 @@ The **BudgetingAgent** is the first modular agent in the FinSense AI project. It
 
 ---
 
-✅ Supported Features
+## ✅ Supported Features
 
-📄 PDF Import
+## 📄 PDF Import
 	- Extracts date, description, and amount from PDF lines
 	- Auto-categorizes using user-defined + global keywords
 	- Applies income/expense sign logic
 	- Saves all transactions to AWS RDS (PostgreSQL)
 	- Skips duplicates based on (date, description, amount)
 
-🤖 Auto Categorization
+## 🤖 Auto Categorization
 	- Runs keyword match across global/user keyword tables
 	- Falls back to LLM if no match found
 	- Prompts user to approve or adjust the categorization
 	- Updates transaction type (Needs/Wants/Savings) accordingly
 
-📊 Budget Summarization
+## 📊 Budget Summarization
 	- Uses income and preferred ratio from user_profile table
 	- Applies 50/30/20 rule to evaluate spending limits
 	- Compares actual spending to budgeted goals
