@@ -703,7 +703,7 @@ def update_transaction(
             else:
                 type_ = type_ or "Uncategorized"
 
-        month = date[:7]
+        month = date.strftime("%Y-%m") if isinstance(date, datetime) else str(date)[:7]
 
         # Step 3: Update the transaction
         cur.execute("""
