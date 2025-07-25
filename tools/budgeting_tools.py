@@ -515,7 +515,7 @@ def summarize_budget(user_id: str, month: str) -> str:
         if not result:
             return f"❌ User profile not found for user_id {user_id}."
 
-        monthly_income, ratio = result
+        monthly_income, ratio = float(result[0]), result[1]
         if not monthly_income or monthly_income <= 0:
             return f"❌ Monthly income is not set for this user."
 

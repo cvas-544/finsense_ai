@@ -9,7 +9,7 @@ Use this before launching to production (via EC2):
 * [x] parse\_bank\_pdf(): Correctly parses dates, amounts, and descriptions
 * [ ] record\_transaction(): Stores entries, validates category/type
 * [x] auto\_categorize\_transactions(): Assigns category from keyword or LLM
-* [ ] summarize\_budget(): Enforces 50/30/20 rule with accurate totals
+* [x] summarize\_budget(): Enforces 50/30/20 rule with accurate totals
 * [ ] update\_transaction(): Allows user-initiated edits
 * [ ] summarize\_category\_spending(): Correct filtering by category/month
 * [ ] query\_category\_spending(): Parses NL queries to valid outputs
