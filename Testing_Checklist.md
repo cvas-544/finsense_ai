@@ -7,7 +7,7 @@ Use this before launching to production (via EC2):
 ## 🔪 Unit Tests (Each Tool)
 
 * [x] parse\_bank\_pdf(): Correctly parses dates, amounts, and descriptions
-* [ ] record\_transaction(): Stores entries, validates category/type
+* [x] record\_transaction(): Stores entries, validates category/type
 * [x] auto\_categorize\_transactions(): Assigns category from keyword or LLM
 * [x] summarize\_budget(): Enforces 50/30/20 rule with accurate totals
 * [x] summarize\_income(): Gives the summary of the incomes
