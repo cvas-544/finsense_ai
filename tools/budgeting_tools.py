@@ -593,7 +593,7 @@ def summarize_income(user_id: str) -> Dict:
 
         # Other income sources
         cur.execute("""
-            SELECT source_name, amount FROM other_income_sources
+            SELECT source, amount FROM other_income_sources
             WHERE user_id = %s
         """, (user_id,))
         rows = cur.fetchall()
