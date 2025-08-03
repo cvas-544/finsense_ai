@@ -195,7 +195,7 @@ networkx==3.2.1
 nltk==3.8.1
 notebook==7.0.8
 notebook_shim==0.2.3
-notion-client==2.3.0
+# notion-client==2.3.0
 numba==0.59.1
 numexpr==2.8.7
 numpy==1.26.4
@@ -231,6 +231,7 @@ prompt-toolkit==3.0.43
 Protego==0.1.16
 protobuf==3.20.3
 psutil==5.9.0
+psycopg2-binary==2.9.10
 ptyprocess==0.7.0
 pure-eval==0.2.2
 py-cpuinfo==9.0.0
@@ -269,7 +270,7 @@ PyQtWebEngine==5.15.6
 PySocks==1.7.1
 pytest==7.4.4
 python-dateutil==2.9.0.post0
-python-dotenv==0.21.0
+python-dotenv==1.1.1
 python-json-logger==2.0.7
 python-lsp-black==2.0.0
 python-lsp-jsonrpc==1.1.2

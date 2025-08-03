@@ -84,6 +84,8 @@ def add_user_category_keyword(user_id: str, group_name: str, keyword: str) -> st
 
 def fuzzy_match_transaction_rds(user_id: str, match_str: str) -> Optional[Dict]:
     try:
+        match_str = match_str.strip()
+
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -106,12 +108,16 @@ def fuzzy_match_transaction_rds(user_id: str, match_str: str) -> Optional[Dict]:
                 "amount": row[2],
                 "date": row[3],
                 "category": row[4],
-                "type": row[5]
+                "type": row[5],
+                "user_id": user_id  # ✅ Include user_id in result
             }
+
+        print(f"⚠️ No match found for '{match_str}' for user {user_id}.")
         return None
+
     except Exception as e:
         print(f"❌ Error matching transaction: {e}")
-        return None # Deprecated: Previously matched against local JSON
+        return None
 
 # ----------------------------
 # Tool: 🔁 Extract from Memory Helper
@@ -214,9 +220,7 @@ def parse_bank_pdf(user_id: str, file_path: str) -> Dict:
                                 amount = abs(amount)
                         else:
                             amount = -abs(amount)  # default to expense sign
-
                     else:
-                        # Sign normalization based on resolved type
                         if type_ in ["Needs", "Wants"]:
                             amount = -abs(amount)
                         elif type_ == "Savings":
@@ -257,7 +261,8 @@ def parse_bank_pdf(user_id: str, file_path: str) -> Dict:
                 ))
                 inserted += 1
             except Exception as e:
-                print(f"⚠️ Failed to insert transaction: {e}")
+                print(f"⚠️ Failed to insert transaction ({tx['date']} | {tx['description']}): {e}")
+                conn.rollback()  # 💥 Ensure DB is not locked
 
         conn.commit()
         cur.close()
@@ -421,22 +426,25 @@ def record_transaction(date: str, amount: float, description: str, category: str
 @register_tool(tags=["budgeting", "manual_categorization", "label_transaction"])
 def categorize_transactions(user_id: str, transactions: Union[str, List[Dict]]) -> List[Dict]:
     """
-    Categorizes a specific transaction or list of transactions into budgeting types (Needs/Wants/Savings)
-    based on keyword rules from merged category groups (global + user-specific) and category_type_mapping in RDS.
+    Interactively categorizes a specific transaction or list of transactions into budgeting types (Needs/Wants/Savings)
+    using keyword rules and category_type_mapping in RDS. Supports fuzzy search.
+
+    Prompts the user for confirmation before updating the database.
 
     Args:
         user_id (str): UUID of the user
         transactions (Union[str, List[Dict]]): A fuzzy search string or list of transaction dicts
 
     Returns:
-        List[Dict]: Categorized transactions with 'category' and 'type'
+        List[Dict]: List of updated transactions with final 'category' and 'type'
     """
     from utils.category_groups import load_merged_category_groups
     from utils.db_connection import get_db_connection
+    from tools.budgeting_tools import fuzzy_match_transaction_rds
 
     # Fuzzy match if input is a string
     if isinstance(transactions, str):
-        match = fuzzy_match_transaction_rds(transactions)
+        match = fuzzy_match_transaction_rds(user_id, transactions)
         if match:
             transactions = [match]
         else:
@@ -444,7 +452,7 @@ def categorize_transactions(user_id: str, transactions: Union[str, List[Dict]]) 
 
     group_map = load_merged_category_groups(user_id)
 
-    # Preload type mapping from DB
+    # Load type mapping from DB
     type_lookup = {}
     try:
         conn = get_db_connection()
@@ -453,29 +461,82 @@ def categorize_transactions(user_id: str, transactions: Union[str, List[Dict]]) 
         rows = cur.fetchall()
         for cat, typ in rows:
             type_lookup[cat.lower()] = typ
-        cur.close()
-        conn.close()
     except Exception as e:
         print(f"⚠️ Failed to load type mapping: {e}")
+        return []
 
-    categorized = []
+    updated = []
     for tx in transactions:
         desc = tx.get("description", "").lower()
-        matched_group = None
+        transaction_id = tx.get("transaction_id")  # 🛠️ Ensure this is carried through
 
+        matched_group = None
         for group_name, keywords in group_map.items():
             if any(k.lower() in desc for k in keywords):
                 matched_group = group_name.title()
                 break
 
-        category = matched_group if matched_group else "Uncategorized"
-        budget_type = type_lookup.get(category.lower(), "Uncategorized")
+        suggested_category = matched_group if matched_group else "Uncategorized"
+        suggested_type = type_lookup.get(suggested_category.lower(), "Uncategorized")
 
-        tx["category"] = category
-        tx["type"] = budget_type
-        categorized.append(tx)
+        print(f"\n🔍 Transaction: {tx['description']} | {tx['amount']} on {tx.get('date', '-')}")
+        print(f"💡 Suggest → Category: {suggested_category} | Type: {suggested_type}")
 
-    return categorized
+        while True:
+            choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
+            if choice in ["yes", "no", "skip"]:
+                break
+            else:
+                print("⚠️ Please enter only 'yes', 'no', or 'skip'.")
+
+        if choice == "skip":
+            continue
+        elif choice == "yes":
+            category = suggested_category
+            budget_type = suggested_type
+        elif choice == "no":
+            category = input("📝 Enter custom category: ").strip().title()
+            budget_type = input(f"⚙️ Enter type for {category} (Needs/Wants/Savings): ").strip().title()
+            if budget_type not in ["Needs", "Wants", "Savings"]:
+                budget_type = "Uncategorized"
+
+        # Insert type mapping if new
+        if category.lower() not in type_lookup:
+            try:
+                cur.execute("""
+                    INSERT INTO category_type_mapping (category, budget_type)
+                    VALUES (%s, %s)
+                    ON CONFLICT (category) DO NOTHING
+                """, (category, budget_type))
+                type_lookup[category.lower()] = budget_type
+            except Exception as e:
+                print(f"⚠️ Could not insert new category mapping: {e}")
+
+        # Debug print before update
+        print(f"🛠️ Updating transaction {transaction_id} → {category} | {budget_type}")
+
+        # Update DB transaction
+        try:
+            cur.execute("""
+                UPDATE transactions
+                SET category = %s, type = %s
+                WHERE transaction_id = %s
+            """, (category, budget_type, transaction_id))
+            tx["category"] = category
+            tx["type"] = budget_type
+            tx["transaction_id"] = transaction_id  # Ensure it's retained in return
+            updated.append(tx)
+        except Exception as e:
+            print(f"❌ Failed to update transaction: {e}")
+
+    try:
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+    return updated
 
 # ----------------------------
 # 📊 Tool: Summarize Budget
@@ -485,7 +546,7 @@ def summarize_budget(user_id: str, month: str) -> str:
     """
     Summarizes the user's spending against the 50/30/20 budget rule for a given month.
 
-    Automatically runs auto-categorization for any uncategorized transactions.
+    Automatically checks for uncategorized transactions and asks the user to apply suggestions.
 
     Args:
         user_id (str): UUID of the user.
@@ -498,9 +559,18 @@ def summarize_budget(user_id: str, month: str) -> str:
     from tools.budgeting_tools import auto_categorize_transactions
 
     try:
-        # 🔁 Categorize any uncategorized transactions before summarizing
-        print("🔁 Running auto-categorization before budget summary...")
-        auto_categorize_transactions(user_id)
+        # 🔍 Check uncategorized transactions first
+        print("🔁 Checking for uncategorized transactions before budget summary...")
+        suggestions = auto_categorize_transactions(user_id, dry_run=True, auto_confirm=True)
+
+        if suggestions["updated_count"] > 0:
+            print(f"\n⚠️ There are {suggestions['updated_count']} uncategorized transactions.")
+            confirm = input("💡 Do you want to apply these suggestions now? [yes/no]: ").strip().lower()
+            if confirm == "yes":
+                applied = auto_categorize_transactions(user_id, dry_run=False, auto_confirm=True)
+                print(f"✅ Applied categorization: {applied['updated_count']} updated.")
+            else:
+                print("❌ Skipped applying suggested categorizations.\n")
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -703,7 +773,12 @@ def update_transaction(
             else:
                 type_ = type_ or "Uncategorized"
 
-        month = date.strftime("%Y-%m") if isinstance(date, datetime) else str(date)[:7]
+        if isinstance(date, datetime):
+            month = date.strftime("%Y-%m")
+        elif isinstance(date, str):
+            month = date[:7]
+        else:
+            month = str(date)[:7]
 
         # Step 3: Update the transaction
         cur.execute("""
@@ -883,10 +958,11 @@ def import_pdf_transactions(file_path: str) -> Dict:
 # -----------------------------------------
 
 @register_tool(tags=["budgeting", "autocategorize", "auto", "clean_uncategorized", "smart_categorization"])
-def auto_categorize_transactions(user_id: str) -> Dict:
+def auto_categorize_transactions(user_id: str, dry_run: bool = False, auto_confirm: bool = False) -> Dict:
     """
-    Auto-categorizes uncategorized transactions for a given user using merged keyword rules, LLM fallback,
-    and dynamic category updates. All updates are stored in RDS.
+    Auto-categorizes transactions with missing category or type using keyword rules and LLM fallback.
+    - `dry_run=True` → simulate updates without saving.
+    - `auto_confirm=True` → apply suggestions automatically without user input.
     """
     from tools.budgeting_tools import llm_client
     from utils.db_connection import get_db_connection
@@ -900,11 +976,11 @@ def auto_categorize_transactions(user_id: str) -> Dict:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Load uncategorized transactions
+        # Load transactions missing either category or type
         cur.execute("""
-            SELECT transaction_id, date, amount, description
+            SELECT transaction_id, date, amount, description, category, type
             FROM transactions
-            WHERE user_id = %s AND type = 'Uncategorized'
+            WHERE user_id = %s AND (category = 'Uncategorized' OR type = 'Uncategorized')
             ORDER BY date DESC
         """, (user_id,))
         transactions = cur.fetchall()
@@ -913,7 +989,7 @@ def auto_categorize_transactions(user_id: str) -> Dict:
         cur.execute("SELECT category, budget_type FROM category_type_mapping")
         category_type_map = {cat: typ for cat, typ in cur.fetchall()}
 
-        for tx_id, date, amount, desc in transactions:
+        for tx_id, date, amount, desc, current_cat, current_type in transactions:
             desc_lower = desc.lower()
             matched_category = None
 
@@ -923,14 +999,13 @@ def auto_categorize_transactions(user_id: str) -> Dict:
                     matched_category = group.title()
                     break
 
-            # 2. Fallback to LLM if no match
+            # 2. Fallback to LLM
             if not matched_category:
                 prompt = f"""You are a financial assistant helping to categorize bank transactions.
                 Your task:
                 - Classify the following transaction into exactly ONE category like Groceries, Commute, Subscriptions, 
                   Debt, Health, Clothing, Entertainment, House Expenses, or Savings.
                 - Respond ONLY with the category name.
-                - No explanation. No sentences. Only the category word.
 
                 Transaction details:
                 - Description: {desc}
@@ -949,46 +1024,91 @@ def auto_categorize_transactions(user_id: str) -> Dict:
                 except Exception:
                     matched_category = "Others"
 
-            print(f"\n🔍 Transaction: {desc} | {amount} on {date}")
-            print(f"💡 Suggest → Category: {matched_category}")
-            while True:
-                choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
-                if choice in ["yes", "no", "skip"]:
-                    break
+            category = matched_category if current_cat == "Uncategorized" else current_cat
+
+            if category not in category_type_map:
+                if auto_confirm:
+                    category_type = "Uncategorized"
                 else:
-                    print("⚠️ Please enter only 'yes', 'no', or 'skip'.")
+                    category_type = input(f"⚙️ Enter type for {category} (Needs/Wants/Savings): ").strip().title()
+                    if category_type not in ["Needs", "Wants", "Savings"]:
+                        category_type = "Uncategorized"
+                if category_type != "Uncategorized":
+                    cur.execute("""
+                        INSERT INTO category_type_mapping (category, budget_type)
+                        VALUES (%s, %s)
+                        ON CONFLICT (category) DO NOTHING
+                    """, (category, category_type))
+                category_type_map[category] = category_type
+            else:
+                category_type = category_type_map[category]
+
+            final_type = category_type if current_type == "Uncategorized" else current_type
+
+            print(f"\n🔍 Transaction: {desc} | {amount} on {date}")
+            print(f"💡 Suggest → Category: {category} | Type: {final_type}")
+
+            if auto_confirm:
+                choice = "yes"
+            else:
+                while True:
+                    choice = input("✅ Accept this update? [yes/no/skip]: ").strip().lower()
+                    if choice in ["yes", "no", "skip"]:
+                        break
+                    else:
+                        print("⚠️ Please enter only 'yes', 'no', or 'skip'.")
 
             if choice == "yes":
-                category = matched_category
-                if category not in category_type_map:
-                    category_type = input(f"⚙️ Enter type for {category} (Needs/Wants/Savings): ").strip().title()
-                    if category_type in ["Needs", "Wants", "Savings"]:
-                        category_type_map[category] = category_type
+                if not dry_run:
+                    try:
                         cur.execute("""
-                            INSERT INTO category_type_mapping (category, budget_type)
-                            VALUES (%s, %s)
-                            ON CONFLICT (category) DO NOTHING
-                        """, (category, category_type))
-                    else:
-                        category_type = "Uncategorized"
-                else:
-                    category_type = category_type_map[category]
-
+                            UPDATE transactions
+                            SET category = %s, type = %s
+                            WHERE transaction_id = %s
+                        """, (category, final_type, tx_id))
+                    except Exception as e:
+                        print(f"❌ Failed to update transaction {tx_id}: {e}")
+                        continue
+                updated.append({
+                    "transaction_id": tx_id,
+                    "description": desc,
+                    "amount": amount,
+                    "date": date
+                })
             elif choice == "no":
-                category = input("📝 Enter custom category: ").strip().title()
-                if category not in category_type_map:
-                    category_type = input(f"⚙️ Enter type for {category} (Needs/Wants/Savings): ").strip().title()
-                    if category_type in ["Needs", "Wants", "Savings"]:
-                        category_type_map[category] = category_type
-                        cur.execute("""
-                            INSERT INTO category_type_mapping (category, budget_type)
-                            VALUES (%s, %s)
-                            ON CONFLICT (category) DO NOTHING
-                        """, (category, category_type))
+                custom_cat = input("📝 Enter custom category: ").strip().title()
+                if custom_cat not in category_type_map:
+                    if auto_confirm:
+                        custom_type = "Uncategorized"
                     else:
-                        category_type = "Uncategorized"
+                        custom_type = input(f"⚙️ Enter type for {custom_cat} (Needs/Wants/Savings): ").strip().title()
+                        if custom_type not in ["Needs", "Wants", "Savings"]:
+                            custom_type = "Uncategorized"
+                    cur.execute("""
+                        INSERT INTO category_type_mapping (category, budget_type)
+                        VALUES (%s, %s)
+                        ON CONFLICT (category) DO NOTHING
+                    """, (custom_cat, custom_type))
+                    category_type_map[custom_cat] = custom_type
                 else:
-                    category_type = category_type_map[category]
+                    custom_type = category_type_map[custom_cat]
+
+                if not dry_run:
+                    try:
+                        cur.execute("""
+                            UPDATE transactions
+                            SET category = %s, type = %s
+                            WHERE transaction_id = %s
+                        """, (custom_cat, custom_type, tx_id))
+                    except Exception as e:
+                        print(f"❌ Failed to update transaction {tx_id}: {e}")
+                        continue
+                updated.append({
+                    "transaction_id": tx_id,
+                    "description": desc,
+                    "amount": amount,
+                    "date": date
+                })
             else:
                 skipped.append({
                     "transaction_id": tx_id,
@@ -996,25 +1116,9 @@ def auto_categorize_transactions(user_id: str) -> Dict:
                     "amount": amount,
                     "date": date
                 })
-                continue
 
-            # 3. Update DB
-            try:
-                cur.execute("""
-                    UPDATE transactions
-                    SET category = %s, type = %s
-                    WHERE transaction_id = %s
-                """, (category, category_type, tx_id))
-                updated.append({
-                    "transaction_id": tx_id,
-                    "description": desc,
-                    "amount": amount,
-                    "date": date
-                })
-            except Exception as e:
-                print(f"❌ Failed to update transaction {tx_id}: {e}")
-
-        conn.commit()
+        if not dry_run:
+            conn.commit()
         cur.close()
         conn.close()
 
@@ -1038,17 +1142,28 @@ def summarize_category_spending(user_id: str, month: str, category: str) -> str:
     Summarizes total spending for a given category and month using the latest transaction data.
 
     This tool:
-    - Auto-categorizes uncategorized transactions first
+    - Auto-categorizes uncategorized transactions first (with user confirmation)
     - Fetches transactions from RDS using the user_id
     - Expands the user-requested category using merged category group mappings
     - Filters only negative (expense) transactions
     - Supports the 'All' category for total spending
     - Returns a human-readable summary
     """
+    from tools.budgeting_tools import auto_categorize_transactions, load_merged_category_groups
+    from utils.transactions_store import get_transactions_by_month
 
     # 🧠 Step 0: Auto-categorize uncategorized entries
-    print(f"🔁 Running auto-categorization for user {user_id} before category summary...")
-    auto_categorize_transactions(user_id)
+    print(f"🔁 Checking for uncategorized transactions before category summary...")
+    suggestions = auto_categorize_transactions(user_id, dry_run=True, auto_confirm=True)
+
+    if suggestions["updated_count"] > 0:
+        print(f"\n⚠️ There are {suggestions['updated_count']} uncategorized transactions.")
+        confirm = input("💡 Do you want to apply these suggestions now? [yes/no]: ").strip().lower()
+        if confirm == "yes":
+            applied = auto_categorize_transactions(user_id, dry_run=False, auto_confirm=True)
+            print(f"✅ Applied categorization: {applied['updated_count']} updated.")
+        else:
+            print("❌ Skipped applying suggested categorizations.\n")
 
     print(f"🔍 Filtering for month = {month}, category = {category.lower()} for user {user_id}")
     transactions = get_transactions_by_month(user_id, month)
