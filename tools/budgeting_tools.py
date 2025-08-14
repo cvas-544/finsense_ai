@@ -285,14 +285,6 @@ def parse_bank_pdf(user_id: str, file_path: str) -> Dict:
 def record_income_source(user_id: str, source_name: str, amount: float) -> str:
     """
     Adds a new income source to the RDS `other_income_sources` table.
-
-    Args:
-        user_id: UUID of the user.
-        source_name: Name of the income source (e.g., 'freelance', 'rental')
-        amount: Amount received from this source
-
-    Returns:
-        Confirmation message
     """
     from utils.db_connection import get_db_connection
 
@@ -301,7 +293,7 @@ def record_income_source(user_id: str, source_name: str, amount: float) -> str:
         cur = conn.cursor()
 
         cur.execute("""
-            INSERT INTO other_income_sources (user_id, source_name, amount)
+            INSERT INTO other_income_sources (user_id, source, amount)
             VALUES (%s, %s, %s)
         """, (user_id, source_name.strip().title(), round(amount, 2)))
 

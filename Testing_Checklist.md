@@ -8,12 +8,17 @@ Use this before launching to production (via EC2):
 
 * [x] parse\_bank\_pdf(): Correctly parses dates, amounts, and descriptions
 * [x] auto\_categorize\_transactions(): Assigns category from keyword or LLM
+* [x] categorize\_transactions(): 
 * [x] summarize\_budget(): Enforces 50/30/20 rule with accurate totals
 * [x] summarize\_income(): Gives the summary of the incomes
 * [x] record\_transaction(): Stores entries, validates category/type
 * [x] update\_transaction(): Allows user-initiated edits
-* [ ] summarize\_category\_spending(): Correct filtering by category/month
-* [ ] query\_category\_spending(): Parses NL queries to valid outputs
+* [x] summarize\_category\_spending(): Correct filtering by category/month
+* [x] query\_category\_spending(): Parses NL queries to valid outputs
+* [x] add\_user\_category\_keyword():
+* [x] record\_income\_source():
+* [x] categorize\_transactions():
+* [-] terminate():
 
 > 📂 test files located in: utils/test\_\*.py
 
@@ -21,7 +26,7 @@ Use this before launching to production (via EC2):
 
 ## 🔗 Integration Tests (End-to-End)
 
-* [ ] Upload sample PDF and confirm 15+ transactions are parsed
+* [x] Upload sample PDF and confirm 15+ transactions are parsed
 * [ ] All transactions are auto-categorized, no Uncategorized remains
 * [ ] summarize\_budget() shows accurate distribution
 * [ ] summarize\_category\_spending() gives correct numbers
