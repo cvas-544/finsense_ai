@@ -1,102 +1,156 @@
+# server/telegram_listener.py
 """
-File: telegram_listener.py
-Purpose:
-    Telegram listener for FinSense Agent.
-    - Handles /start
-    - Processes text messages and routes to the budgeting agent
-    - Supports per-user budget summary via telegram_id lookup
+Telegram listener for FinSense Agent.
+- Loads secrets from .env
+- Handles /start
+- Routes free-text to parser → summary tools
+- Falls back to the agent if parsing fails
 """
 
-from utils.notion_sync_runner import sync_from_notion
-from agents.onboarding_flow import load_user_profile
-from agents.budgeting_agent import create_budgeting_agent
+import os
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from tools.budgeting_tools import (
-    summarize_category_spending,
-    summarize_budget,
-    extract_transactions_from_db,
-)
-from utils.transactions_store import get_all_transactions
-from utils.query_parser import call_parse_budget_query
-from utils.db_connection import get_db_connection
 
-# One-time startup
-sync_from_notion()
-profile = load_user_profile()
-print("✅ Notion synced. Profile loaded.")
+from utils.db_connection import get_db_connection
+from utils.query_parser import call_parse_budget_query
+from utils.transactions_store import get_all_transactions
+
+from tools.budgeting_tools import (
+    summarize_budget,
+    summarize_category_spending,
+    summarize_income,
+)
+
+from agents.budgeting_agent import create_budgeting_agent
+
+# ── bootstrap ──────────────────────────────────────────────────────────────────
+load_dotenv()  # <— load TELEGRAM_TOKEN and DB creds from .env
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+log = logging.getLogger("telegram_listener")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN environment variable is not set.")
 
 agent = create_budgeting_agent()
-TELEGRAM_TOKEN = "7628731197:AAF4KW4zLyDMQWhFbC7ZKS0B8N-Rh_VoFpc"
+log.info("🤖 Budgeting agent initialized.")
 
 
-def get_user_id_from_telegram_id(telegram_id: int) -> str:
+def get_user_id_from_telegram_id(telegram_id: int) -> str | None:
+    """Look up our internal user_id using the Telegram user id."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT user_id FROM user_profile WHERE telegram_id = %s", (telegram_id,))
+        cur.execute(
+            "SELECT user_id FROM user_profile WHERE telegram_id = %s",
+            (telegram_id,),
+        )
         row = cur.fetchone()
         cur.close()
         conn.close()
         return str(row[0]) if row else None
     except Exception as e:
-        print(f"❌ Error fetching user_id: {e}")
+        log.exception("Error fetching user_id for telegram_id=%s", telegram_id)
         return None
 
 
+# ── handlers ──────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! I’m FinSense. Ask me anything about your budget!")
+    await update.message.reply_text(
+        "👋 Hi! I’m FinSense.\n"
+        "Try: “groceries in July”, “budget July 2025”, or “income summary”."
+    )
+
+
+def _safe_month(month: str | None) -> str:
+    """Default to current YYYY-MM if parser didn’t find one."""
+    return month if month else datetime.utcnow().strftime("%Y-%m")
+
+
+def _safe_category(cat: str | None) -> str:
+    """Default to 'All' if parser didn’t find a category."""
+    return cat if cat else "All"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
+    query = update.message.text or ""
     telegram_id = update.effective_user.id
-    print(f"\n📨 Message from Telegram ID {telegram_id}: {query}")
+    log.info("📨 From %s: %s", telegram_id, query)
 
     user_id = get_user_id_from_telegram_id(telegram_id)
     if not user_id:
-        await update.message.reply_text("⚠️ You are not onboarded yet. Please use the web app to create your profile.")
+        await update.message.reply_text(
+            "⚠️ I don’t recognize you yet. Please complete onboarding in the app."
+        )
         return
 
     try:
-        print("🔍 [Parser] Attempting to parse budget query…")
+        # Parse intent
         parsed = call_parse_budget_query(query)
-        category = parsed.get("category")
-        month = parsed.get("month")
-        print(f"✅ [Parser] category={category}, month={month}")
+        month = _safe_month(parsed.get("month"))
+        category = _safe_category(parsed.get("category"))
 
-        txs = get_all_transactions()
+        # Touch transactions store (warmup/readiness)
+        try:
+            _ = get_all_transactions()
+        except Exception:
+            # Non-fatal for summaries
+            pass
 
-        if "budget" in query.lower():
-            print("📊 Running summarize_budget()")
-            reply = summarize_budget(user_id=user_id, month=month)
-        elif "income" in query.lower():
-            from tools.budgeting_tools import summarize_income
-            print("💰 Running summarize_income()")
-            reply = summarize_income(user_id=user_id, month=month)
+        lower = query.lower()
+        if "income" in lower:
+            log.info("💰 summarize_income(user=%s)", user_id)
+            inc = summarize_income(user_id=user_id)
+            # summarize_income returns a dict; show a friendly line
+            msg = inc.get("message") or f"Total income: €{inc.get('total_income', 0)}"
+        elif "budget" in lower:
+            log.info("📊 summarize_budget(user=%s, month=%s)", user_id, month)
+            msg = summarize_budget(user_id=user_id, month=month)
         else:
-            print("📂 Running summarize_category_spending()")
-            reply = summarize_category_spending(user_id=user_id, category=category, month=month)
+            log.info(
+                "📂 summarize_category_spending(user=%s, month=%s, category=%s)",
+                user_id, month, category
+            )
+            msg = summarize_category_spending(
+                user_id=user_id, month=month, category=category
+            )
 
     except Exception as e:
-        print(f"⚠️ Fallback to agent due to error: {e}")
+        log.warning("Parser/summary failed, falling back to agent: %s", e)
+        # Fallback to LLM agent
         result = agent.run(user_input=query, max_iterations=10)
-        if hasattr(result, "get_memories"):
-            messages = result.get_memories()
-            assistant_msgs = [m for m in messages if m.get("type") == "assistant" and m.get("content")]
-            reply = assistant_msgs[-1]["content"].strip() if assistant_msgs else "🤖 No assistant response found."
-        else:
-            reply = str(result).strip()
+        # Try to unwrap a clean assistant message if available
+        msg = str(result).strip()
+        try:
+            if hasattr(result, "get_memories"):
+                messages = result.get_memories()
+                assistant_msgs = [
+                    m for m in messages
+                    if m.get("type") == "assistant" and m.get("content")
+                ]
+                if assistant_msgs:
+                    msg = assistant_msgs[-1]["content"].strip()
+        except Exception:
+            pass
 
-    print(f"📤 Reply: {reply}")
-    await update.message.reply_text(reply)
+    log.info("📤 Replying: %s", msg)
+    await update.message.reply_text(msg)
 
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+
+    log.info("🚀 Telegram bot started. Listening…")
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
